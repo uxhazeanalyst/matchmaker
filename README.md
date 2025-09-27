@@ -1,3 +1,6 @@
+chat commands
+
+
 /mc show       - Show window
 /mc toggle     - Toggle visibility  
 /mc tab [1-5]  - Jump to specific tab
