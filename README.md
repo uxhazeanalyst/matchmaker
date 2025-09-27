@@ -1,5 +1,4 @@
-chat commands
-
+chat commands:
 
 /mc show       - Show window
 /mc toggle     - Toggle visibility  
