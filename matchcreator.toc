@@ -1,0 +1,8 @@
+## Interface: 100200
+## Title: Match Creator
+## Notes: Dungeon-specific group composition recommendations
+## Author: YourName
+## Version: 1.0.0
+## SavedVariables: MatchCreatorDB
+
+MatchCreator.lua
