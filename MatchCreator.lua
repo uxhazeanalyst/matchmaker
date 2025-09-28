@@ -1,4 +1,1797 @@
--- Calculate guild statistics
+-- Initialize all systems on load
+local function InitializeAddon()
+    if MatchCreator.minimapButton then return end
+    MatchCreator.minimapButton = MatchCreator:CreateMinimapButton()
+    MatchCreator:InitializeSmartSuggestions()
+    MatchCreator:InitializeCombatAnalytics()
+    MatchCreator:InitializeVisualization()
+    
+    -- Initialize guild planner if in guild
+    if IsInGuild() then
+        MatchCreator:InitializeGuildPlanner()
+    end
+end
+
+-- Hook into addon loading
+local initFrame = CreateFrame("Frame")
+initFrame:RegisterEvent("ADDON_LOADED")
+initFrame:RegisterEvent("PLAYER_LOGIN")
+initFrame:RegisterEvent("GUILD_ROSTER_UPDATE")
+initFrame:RegisterEvent("CHALLENGE_MODE_START")
+initFrame:SetScript("OnEvent", function(self, event, addonName)
+    if (event == "ADDON_LOADED" and addonName == "MatchCreator") or event == "PLAYER_LOGIN" then
+        InitializeAddon()
+        print("|cFF00FF00Match Creator|r loaded! Use /mc for commands or click the minimap button.")
+        print("|cFF88FF88Smart Suggestions:|r Real-time applicant analysis and group optimization active!")
+        print("|cFF00FF96Combat Analytics:|r Real-time performance tracking ready!")
+        print("|cFF00CCFF3D Visualizer:|r Advanced visualization system loaded!")
+        if IsInGuild() then
+            print("|cFFFFD700Guild Planner:|r Use '/mc guild' to access guild composition tools!")
+        end
+    elseif event == "GUILD_ROSTER_UPDATE" and MatchCreator.guildPlanner then
+        MatchCreator:UpdateGuildRoster()
+    elseif event == "CHALLENGE_MODE_START" then
+        -- Auto-start tracking for mythic+ runs
+        MatchCreator:StartRunTracking()
+    end
+end)
+
+-- Advanced 2D Heat Map Fallback (for when 3D isn't available)
+function MatchCreator:ShowAdvanced2DHeatMap()
+    if MatchCreator2DHeatFrame then
+        MatchCreator2DHeatFrame:Show()
+        self:Update2DHeatMap()
+        return
+    end
+    
+    -- Create 2D heat map frame
+    local frame = CreateFrame("Frame", "MatchCreator2DHeatFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame:SetSize(1000, 600)
+    frame:SetPoint("CENTER", 0, 0)
+    frame.title = frame:CreateFontString(nil, "OVERLAY")
+    frame.title:SetFontObject("GameFontHighlight")
+    frame.title:SetPoint("LEFT", frame.TitleBg, "LEFT", 5, 0)
+    frame.title:SetText("Match Creator - Performance Heat Map")
+    
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    
+    -- Create heat map grid
+    frame.grid = CreateFrame("Frame", nil, frame)
+    frame.grid:SetPoint("TOPLEFT", frame.Inset, "TOPLEFT", 50, -50)
+    frame.grid:SetPoint("BOTTOMRIGHT", frame.Inset, "BOTTOMRIGHT", -50, 50)
+    
+    -- Heat map data structure
+    frame.cells = {}
+    frame.labels = {}
+    
+    self:Create2DHeatMapGrid(frame)
+    frame:Show()
+end
+
+-- Create 2D heat map grid
+function MatchCreator:Create2DHeatMapGrid(frame)
+    local dungeons = {}
+    local specs = {}
+    
+    -- Collect dungeons and specs
+    for dungeonName, dungeonData in pairs(self.dungeonData) do
+        table.insert(dungeons, dungeonName)
+        for role, roleSpecs in pairs(dungeonData.preferredSpecs) do
+            for specName, rating in pairs(roleSpecs) do
+                if not specs[specName] then
+                    specs[specName] = true
+                    table.insert(specs, specName)
+                end
+            end
+        end
+    end
+    
+    -- Sort for consistent layout
+    table.sort(dungeons)
+    table.sort(specs)
+    
+    local cellWidth = (frame.grid:GetWidth() - 100) / #dungeons
+    local cellHeight = (frame.grid:GetHeight() - 100) / #specs
+    
+    -- Create cells
+    for specIndex, specName in ipairs(specs) do
+        if type(specName) == "string" then
+            frame.cells[specIndex] = {}
+            
+            for dungeonIndex, dungeonName in ipairs(dungeons) do
+                local cell = self:Create2DHeatMapCell(frame.grid, specName, dungeonName, 
+                    dungeonIndex * cellWidth, -specIndex * cellHeight, cellWidth, cellHeight)
+                frame.cells[specIndex][dungeonIndex] = cell
+            end
+        end
+    end
+    
+    -- Add labels
+    self:Create2DHeatMapLabels(frame, dungeons, specs, cellWidth, cellHeight)
+end
+
+-- Create individual heat map cell
+function MatchCreator:Create2DHeatMapCell(parent, specName, dungeonName, x, y, width, height)
+    local cell = CreateFrame("Frame", nil, parent)
+    cell:SetSize(width - 2, height - 2)
+    cell:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+    
+    -- Get rating for this spec/dungeon combination
+    local rating = self:GetSpecDungeonRatingForHeatMap(specName, dungeonName)
+    
+    -- Color based on rating
+    local bg = cell:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(unpack(self:GetHeatMapColor(rating)))
+    
+    -- Rating text
+    local text = cell:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    text:SetPoint("CENTER", cell, "CENTER")
+    text:SetText(rating > 0 and tostring(rating) or "-")
+    text:SetTextColor(rating >= 70 and 0 or 1, rating >= 70 and 0 or 1, rating >= 70 and 0 or 1)
+    
+    -- Tooltip
+    cell:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+        GameTooltip:SetText(specName, 1, 1, 1)
+        GameTooltip:AddLine(dungeonName, 0.7, 0.7, 0.7)
+        if rating > 0 then
+            local ratingColor = rating >= 90 and {0, 1, 0} or rating >= 80 and {1, 1, 0} or {1, 0.5, 0}
+            GameTooltip:AddLine("Performance Rating: " .. rating .. "%", unpack(ratingColor))
+            GameTooltip:AddLine(self:GetPerformanceDescription(rating), 0.8, 0.8, 0.8)
+        else
+            GameTooltip:AddLine("No data available", 0.5, 0.5, 0.5)
+        end
+        GameTooltip:Show()
+    end)
+    
+    cell:SetScript("OnLeave", function(self)
+        GameTooltip:Hide()
+    end)
+    
+    cell.specName = specName
+    cell.dungeonName = dungeonName
+    cell.rating = rating
+    
+    return cell
+end
+
+-- Get performance description for rating
+function MatchCreator:GetPerformanceDescription(rating)
+    if rating >= 95 then
+        return "Exceptional - Perfect for this content"
+    elseif rating >= 90 then
+        return "Excellent - Highly recommended"
+    elseif rating >= 80 then
+        return "Very Good - Strong choice"
+    elseif rating >= 70 then
+        return "Good - Solid performance expected"
+    elseif rating >= 60 then
+        return "Average - Can handle the content"
+    elseif rating >= 50 then
+        return "Below Average - May struggle"
+    else
+        return "Poor - Not recommended"
+    end
+end
+
+-- Get heat map color based on rating
+function MatchCreator:GetHeatMapColor(rating)
+    if rating >= 95 then
+        return {0, 0.8, 0, 0.9}      -- Bright green
+    elseif rating >= 90 then
+        return {0.4, 1, 0, 0.9}      -- Green-yellow
+    elseif rating >= 80 then
+        return {0.8, 1, 0, 0.9}      -- Yellow-green
+    elseif rating >= 70 then
+        return {1, 1, 0, 0.9}        -- Yellow
+    elseif rating >= 60 then
+        return {1, 0.7, 0, 0.9}      -- Orange
+    elseif rating >= 50 then
+        return {1, 0.4, 0, 0.9}      -- Orange-red
+    elseif rating > 0 then
+        return {1, 0.2, 0.2, 0.9}    -- Red
+    else
+        return {0.3, 0.3, 0.3, 0.9}  -- Gray for no data
+    end
+end
+
+-- Timeline Prediction 2D Graph
+function MatchCreator:ShowTimelineGraph()
+    if MatchCreatorTimelineFrame then
+        MatchCreatorTimelineFrame:Show()
+        self:UpdateTimelineGraph()
+        return
+    end
+    
+    -- Create timeline frame
+    local frame = CreateFrame("Frame", "MatchCreatorTimelineFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame:SetSize(800, 500)
+    frame:SetPoint("CENTER", 0, 0)
+    frame.title = frame:CreateFontString(nil, "OVERLAY")
+    frame.title:SetFontObject("GameFontHighlight")
+    frame.title:SetPoint("LEFT", frame.TitleBg, "LEFT", 5, 0)
+    frame.title:SetText("Match Creator - Performance Timeline Prediction")
+    
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    
+    -- Create graph area
+    frame.graph = CreateFrame("Frame", nil, frame)
+    frame.graph:SetPoint("TOPLEFT", frame.Inset, "TOPLEFT", 50, -50)
+    frame.graph:SetPoint("BOTTOMRIGHT", frame.Inset, "BOTTOMRIGHT", -50, 80)
+    
+    -- Graph background
+    local graphBG = frame.graph:CreateTexture(nil, "BACKGROUND")
+    graphBG:SetAllPoints()
+    graphBG:SetColorTexture(0.1, 0.1, 0.1, 0.7)
+    
+    self:CreateTimelineGraphAxes(frame)
+    self:CreateTimelineGraphData(frame)
+    
+    frame:Show()
+end
+
+-- Create timeline graph axes
+function MatchCreator:CreateTimelineGraphAxes(frame)
+    local graph = frame.graph
+    
+    -- X-axis (Key levels 15-25)
+    for keyLevel = 15, 25 do
+        local x = ((keyLevel - 15) / 10) * graph:GetWidth()
+        
+        -- Grid line
+        local gridLine = graph:CreateTexture(nil, "ARTWORK")
+        gridLine:SetSize(1, graph:GetHeight())
+        gridLine:SetPoint("TOPLEFT", graph, "TOPLEFT", x, 0)
+        gridLine:SetColorTexture(0.3, 0.3, 0.3, 0.5)
+        
+        -- Label
+        local label = graph:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        label:SetPoint("TOP", graph, "BOTTOMLEFT", x, -5)
+        label:SetText("+" .. keyLevel)
+    end
+    
+    -- Y-axis (Success chance 0-100%)
+    for percent = 0, 100, 20 do
+        local y = -(percent / 100) * graph:GetHeight()
+        
+        -- Grid line
+        local gridLine = graph:CreateTexture(nil, "ARTWORK")
+        gridLine:SetSize(graph:GetWidth(), 1)
+        gridLine:SetPoint("TOPLEFT", graph, "TOPLEFT", 0, y)
+        gridLine:SetColorTexture(0.3, 0.3, 0.3, 0.5)
+        
+        -- Label
+        local label = graph:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        label:SetPoint("RIGHT", graph, "TOPLEFT", -5, y)
+        label:SetText(percent .. "%")
+    end
+    
+    -- Axis titles
+    local xAxisTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    xAxisTitle:SetPoint("BOTTOM", frame, "BOTTOM", 0, 5)
+    xAxisTitle:SetText("Key Level")
+    
+    local yAxisTitle = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    yAxisTitle:SetPoint("LEFT", frame, "LEFT", 5, 0)
+    yAxisTitle:SetText("Success Chance %")
+end
+
+-- Create timeline graph data points
+function MatchCreator:CreateTimelineGraphData(frame)
+    local graph = frame.graph
+    local groupComp = self:AnalyzeCurrentGroupDetailed()
+    local dungeonName = self:GetCurrentDungeon()
+    
+    if not groupComp or not dungeonName then
+        local noDataText = graph:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        noDataText:SetPoint("CENTER", graph, "CENTER")
+        noDataText:SetText("No group composition data available")
+        return
+    end
+    
+    -- Generate predictions for key levels 15-25
+    local dataPoints = {}
+    local previousPoint = nil
+    
+    for keyLevel = 15, 25 do
+        local prediction = self:PredictGroupPerformance(groupComp, dungeonName, keyLevel)
+        local x = ((keyLevel - 15) / 10) * graph:GetWidth()
+        local y = -(prediction.successChance / 100) * graph:GetHeight()
+        
+        -- Create data point
+        local point = CreateFrame("Frame", nil, graph)
+        point:SetSize(8, 8)
+        point:SetPoint("TOPLEFT", graph, "TOPLEFT", x - 4, y + 4)
+        
+        local pointTexture = point:CreateTexture(nil, "OVERLAY")
+        pointTexture:SetAllPoints()
+        pointTexture:SetTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+        
+        -- Color based on success chance
+        if prediction.successChance >= 80 then
+            pointTexture:SetVertexColor(0, 1, 0) -- Green
+        elseif prediction.successChance >= 60 then
+            pointTexture:SetVertexColor(1, 1, 0) -- Yellow
+        else
+            pointTexture:SetVertexColor(1, 0, 0) -- Red
+        end
+        
+        -- Tooltip
+        point:SetScript("OnEnter", function(self)
+            GameTooltip:SetOwner(self, "ANCHOR_CURSOR")
+            GameTooltip:SetText("Key Level +" .. keyLevel, 1, 1, 1)
+            GameTooltip:AddLine("Success Chance: " .. prediction.successChance .. "%", 0.7, 0.7, 0.7)
+            GameTooltip:AddLine("Expected Time: " .. prediction.expectedTime .. " minutes", 0.7, 0.7, 0.7)
+            if #prediction.recommendations > 0 then
+                GameTooltip:AddLine("Recommendation: " .. prediction.recommendations[1], 0.8, 0.8, 0.8)
+            end
+            GameTooltip:Show()
+        end)
+        
+        point:SetScript("OnLeave", function(self)
+            GameTooltip:Hide()
+        end)
+        
+        -- Connect to previous point with line
+        if previousPoint then
+            self:CreateTimelineConnectionLine(graph, previousPoint, {x = x, y = y, successChance = prediction.successChance})
+        end
+        
+        previousPoint = {x = x, y = y, successChance = prediction.successChance}
+        table.insert(dataPoints, {point = point, data = prediction, keyLevel = keyLevel})
+    end
+end
+
+-- Create connection line between timeline points
+function MatchCreator:CreateTimelineConnectionLine(parent, startPoint, endPoint)
+    local line = CreateFrame("Frame", nil, parent)
+    
+    -- Calculate line properties
+    local deltaX = endPoint.x - startPoint.x
+    local deltaY = endPoint.y - startPoint.y
+    local distance = math.sqrt(deltaX^2 + deltaY^2)
+    local angle = math.atan2(deltaY, deltaX)
+    
+    line:SetSize(distance, 2)
+    line:SetPoint("LEFT", parent, "TOPLEFT", startPoint.x, startPoint.y)
+    
+    local lineTexture = line:CreateTexture(nil, "ARTWORK")
+    lineTexture:SetAllPoints()
+    lineTexture:SetColorTexture(0.7, 0.7, 1, 0.8)
+    
+    -- Rotate line (conceptual - WoW doesn't support texture rotation directly)
+    -- In a real implementation, this would use multiple small segments
+end
+
+-- Predict group performance at specific key level
+function MatchCreator:PredictGroupPerformance(groupComp, dungeonName, keyLevel)
+    local baseSuccessChance = 85 -- Start optimistic
+    local baseTime = 20 -- Base completion time in minutes
+    
+    local dungeonData = self.dungeonData[dungeonName]
+    if not dungeonData then
+        return {
+            successChance = 50,
+            expectedTime = 30,
+            difficultyFactors = {},
+            recommendations = {"Unknown dungeon data"}
+        }
+    end
+    
+    -- Analyze group composition effectiveness
+    local compScore = 0
+    local memberCount = 0
+    
+    -- Tank analysis
+    if groupComp.tanks and #groupComp.tanks > 0 then
+        local tank = groupComp.tanks[1]
+        local tankRating = self:GetSpecDungeonRating(tank.class, tank.spec, "tank", dungeonName)
+        compScore = compScore + tankRating
+        memberCount = memberCount + 1
+    end
+    
+    -- Healer analysis
+    if groupComp.healers and #groupComp.healers > 0 then
+        local healer = groupComp.healers[1]
+        local healerRating = self:GetSpecDungeonRating(healer.class, healer.spec, "healer", dungeonName)
+        compScore = compScore + healerRating
+        memberCount = memberCount + 1
+    end
+    
+    -- DPS analysis
+    if groupComp.dps then
+        for _, dps in ipairs(groupComp.dps) do
+            local dpsRating = self:GetSpecDungeonRating(dps.class, dps.spec, "dps", dungeonName)
+            compScore = compScore + dpsRating
+            memberCount = memberCount + 1
+        end
+    end
+    
+    -- Calculate average composition score
+    local avgCompScore = memberCount > 0 and (compScore / memberCount) or 60
+    
+    -- Adjust success chance based on composition
+    local compAdjustment = (avgCompScore - 70) * 0.5 -- ±15% based on comp quality
+    baseSuccessChance = baseSuccessChance + compAdjustment
+    
+    -- Key level difficulty scaling
+    local difficultyMultiplier = math.max(0.1, 1 - ((keyLevel - 15) * 0.08)) -- -8% per level above 15
+    baseSuccessChance = baseSuccessChance * difficultyMultiplier
+    
+    -- Time scaling
+    local timeMultiplier = 1 + ((keyLevel - 15) * 0.05) -- +5% time per level
+    baseTime = baseTime * timeMultiplier
+    
+    -- Generate recommendations
+    local recommendations = {}
+    if avgCompScore < 70 then
+        table.insert(recommendations, "Consider optimizing group composition for this dungeon")
+    end
+    if keyLevel >= 20 and baseSuccessChance < 60 then
+        table.insert(recommendations, "High key level - ensure optimal gear and coordination")
+    end
+    
+    return {
+        successChance = math.max(5, math.min(95, math.floor(baseSuccessChance))),
+        expectedTime = math.floor(baseTime),
+        difficultyFactors = {
+            compositionScore = avgCompScore,
+            keyLevelPenalty = (1 - difficultyMultiplier) * 100,
+            dungeonComplexity = 50 -- Placeholder
+        },
+        recommendations = recommendations
+    }
+end
+
+-- Enhanced command system for visualization
+local enhance3DCommands = SlashCmdList["MATCHCREATOR"]
+SlashCmdList["MATCHCREATOR"] = function(msg)
+    local args = {strsplit(" ", msg)}
+    local cmd = args[1] and string.lower(args[1]) or ""
+    
+    if cmd == "visual" or cmd == "viz" then
+        print("|cFF00CCFF3D Visualization Options:|r")
+        print("/mc 3d - Full 3D Group Visualizer")
+        print("/mc heatmap2d - 2D Performance Heat Map") 
+        print("/mc timeline2d - 2D Timeline Predictions")
+        print("/mc synergy - 3D Group Synergy View")
+        print("/mc performance - Performance Analysis View")
+        
+    elseif cmd == "heatmap2d" then
+        MatchCreator:ShowAdvanced2DHeatMap()
+        
+    elseif cmd == "timeline2d" then
+        MatchCreator:ShowTimelineGraph()
+        
+    elseif cmd == "performance" then
+        local groupComp = MatchCreator:AnalyzeCurrentGroupDetailed()
+        local dungeonName = MatchCreator:GetCurrentDungeon()
+        
+        if groupComp and dungeonName then
+            local prediction = MatchCreator:PredictGroupPerformance(groupComp, dungeonName, 20)
+            print("|cFF00CCFF Performance Analysis:|r")
+            print("Success Chance: " .. prediction.successChance .. "%")
+            print("Expected Time: " .. prediction.expectedTime .. " minutes")
+            print("Composition Score: " .. prediction.difficultyFactors.compositionScore)
+        else
+            print("|cFFFF0000Error:|r Need group composition and dungeon selection")
+        end
+        
+    else
+        -- Call enhanced handler
+        enhance3DCommands(msg)
+    end
+end-- Show comprehensive post-run analysis
+function MatchCreator:ShowPostRunAnalysis(runData, analysis)
+    if MatchCreatorAnalysisFrame then
+        MatchCreatorAnalysisFrame:Show()
+        self:UpdateAnalysisFrame(runData, analysis)
+        return
+    end
+    
+    -- Create analysis frame
+    local frame = CreateFrame("Frame", "MatchCreatorAnalysisFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame:SetSize(700, 500)
+    frame:SetPoint("CENTER", 0, 0)
+    frame:SetFrameStrata("HIGH")
+    
+    frame.title = frame:CreateFontString(nil, "OVERLAY")
+    frame.title:SetFontObject("GameFontHighlight")
+    frame.title:SetPoint("LEFT", frame.TitleBg, "LEFT", 5, 0)
+    frame.title:SetText("Post-Run Performance Analysis")
+    
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    
+    -- Create tabbed interface for analysis
+    frame.analysisTabs = {}
+    frame.analysisTabContents = {}
+    frame.activeAnalysisTab = 1
+    
+    local analysisTabNames = {"Overview", "Predictions", "Performance", "Recommendations"}
+    local tabWidth = 160
+    
+    for i, tabName in ipairs(analysisTabNames) do
+        local tab = CreateFrame("Button", "MatchCreatorAnalysisTab"..i, frame, "TabButtonTemplate")
+        tab:SetSize(tabWidth, 32)
+        tab:SetPoint("TOPLEFT", frame, "BOTTOMLEFT", (i-1) * tabWidth, 2)
+        tab:SetText(tabName)
+        tab.tabIndex = i
+        
+        tab:SetScript("OnClick", function(self)
+            MatchCreator:SelectAnalysisTab(self.tabIndex)
+        end)
+        
+        frame.analysisTabs[i] = tab
+        
+        -- Create content frame
+        local content = CreateFrame("ScrollFrame", "MatchCreatorAnalysisContent"..i, frame, "UIPanelScrollFrameTemplate")
+        content:SetPoint("TOPLEFT", frame.Inset, "TOPLEFT", 4, -4)
+        content:SetPoint("BOTTOMRIGHT", frame.Inset, "BOTTOMRIGHT", -24, 4)
+        
+        local contentChild = CreateFrame("Frame", nil, content)
+        contentChild:SetSize(650, 440)
+        content:SetScrollChild(contentChild)
+        content:Hide()
+        
+        frame.analysisTabContents[i] = {frame = content, child = contentChild, elements = {}}
+    end
+    
+    -- Show first tab
+    frame.analysisTabContents[1].frame:Show()
+    PanelTemplates_SelectTab(frame.analysisTabs[1])
+    
+    -- Store data for reference
+    frame.runData = runData
+    frame.analysis = analysis
+    
+    self:UpdateAnalysisFrame(runData, analysis)
+    frame:Show()
+end
+
+-- Update analysis frame with data
+function MatchCreator:UpdateAnalysisFrame(runData, analysis)
+    local frame = MatchCreatorAnalysisFrame
+    if not frame then return end
+    
+    -- Update all tabs
+    for i = 1, 4 do
+        self:UpdateAnalysisTabContent(i, runData, analysis)
+    end
+end
+
+-- Update specific analysis tab content
+function MatchCreator:UpdateAnalysisTabContent(tabIndex, runData, analysis)
+    if tabIndex == 1 then
+        self:UpdateAnalysisOverviewTab(runData, analysis)
+    elseif tabIndex == 2 then
+        self:UpdateAnalysisPredictionsTab(runData, analysis)
+    elseif tabIndex == 3 then
+        self:UpdateAnalysisPerformanceTab(runData, analysis)
+    elseif tabIndex == 4 then
+        self:UpdateAnalysisRecommendationsTab(runData, analysis)
+    end
+end
+
+-- Update overview tab
+function MatchCreator:UpdateAnalysisOverviewTab(runData, analysis)
+    local content = MatchCreatorAnalysisFrame.analysisTabContents[1]
+    self:ClearAnalysisTabContent(1)
+    
+    local yOffset = -10
+    
+    -- Run header
+    local headerText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    headerText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    headerText:SetText("|cFFFFD700" .. runData.dungeonName .. " Analysis|r")
+    table.insert(content.elements, headerText)
+    yOffset = yOffset - 30
+    
+    -- Run summary
+    local summaryText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    summaryText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    local successColor = runData.success and "|cFF00FF00COMPLETED|r" or "|cFFFF6666FAILED|r"
+    local minutes = math.floor(runData.completionTime / 60)
+    local seconds = runData.completionTime % 60
+    summaryText:SetText(string.format("Status: %s | Duration: %02d:%02d | Key Level: +%d", 
+        successColor, minutes, seconds, runData.keyLevel or 0))
+    table.insert(content.elements, summaryText)
+    yOffset = yOffset - 25
+    
+    -- Overall performance rating
+    local ratingText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    ratingText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    local ratingColor = analysis.overall.rating == "Excellent" and "|cFF00FF00" or
+                       analysis.overall.rating == "Good" and "|cFFFFAA00" or
+                       analysis.overall.rating == "Average" and "|cFFFFFFFF" or "|cFFFF6666"
+    ratingText:SetText("Overall Performance: " .. ratingColor .. analysis.overall.rating .. "|r")
+    table.insert(content.elements, ratingText)
+    yOffset = yOffset - 40
+    
+    -- Key metrics overview
+    local metricsTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    metricsTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    metricsTitle:SetText("|cFFFFAA00Key Performance Metrics:|r")
+    table.insert(content.elements, metricsTitle)
+    yOffset = yOffset - 25
+    
+    -- Interrupt success rate
+    local intStats = runData.mechanics.interrupts
+    local intSuccess = intStats.attempted > 0 and math.floor((intStats.successful / intStats.attempted) * 100) or 0
+    local intText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    intText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+    local intColor = intSuccess >= 80 and "|cFF00FF00" or intSuccess >= 60 and "|cFFFFAA00" or "|cFFFF6666"
+    intText:SetText(string.format("Interrupt Success Rate: %s%d%% (%d/%d)|r", intColor, intSuccess, intStats.successful, intStats.attempted))
+    table.insert(content.elements, intText)
+    yOffset = yOffset - 18
+    
+    -- Death analysis
+    local deathText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    deathText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+    local deathColor = runData.mechanics.deaths.total == 0 and "|cFF00FF00" or 
+                      runData.mechanics.deaths.total <= 2 and "|cFFFFAA00" or "|cFFFF6666"
+    local avoidableText = runData.mechanics.deaths.avoidable > 0 and 
+        string.format(" (%d avoidable)", runData.mechanics.deaths.avoidable) or ""
+    deathText:SetText(string.format("Total Deaths: %s%d%s|r", deathColor, runData.mechanics.deaths.total, avoidableText))
+    table.insert(content.elements, deathText)
+    yOffset = yOffset - 25
+    
+    -- Prediction accuracy
+    if analysis.predictions.accuracy > 0 then
+        local predText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        predText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+        local predColor = analysis.predictions.accuracy >= 80 and "|cFF00FF00" or
+                         analysis.predictions.accuracy >= 60 and "|cFFFFAA00" or "|cFFFF6666"
+        predText:SetText(string.format("Prediction Accuracy: %s%d%%|r", predColor, math.floor(analysis.predictions.accuracy)))
+        table.insert(content.elements, predText)
+        yOffset = yOffset - 30
+    end
+    
+    -- Top strengths
+    if #analysis.strengths > 0 then
+        local strengthTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        strengthTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        strengthTitle:SetText("|cFF00FF00Group Strengths:|r")
+        table.insert(content.elements, strengthTitle)
+        yOffset = yOffset - 20
+        
+        for i = 1, math.min(3, #analysis.strengths) do
+            local strengthText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            strengthText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+            strengthText:SetWidth(600)
+            strengthText:SetText("|cFF88FF88✓ " .. analysis.strengths[i] .. "|r")
+            strengthText:SetJustifyH("LEFT")
+            table.insert(content.elements, strengthText)
+            yOffset = yOffset - 16
+        end
+        yOffset = yOffset - 10
+    end
+    
+    -- Top improvement areas
+    if #analysis.improvements > 0 then
+        local improvementTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        improvementTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        improvementTitle:SetText("|cFFFF6666Areas for Improvement:|r")
+        table.insert(content.elements, improvementTitle)
+        yOffset = yOffset - 20
+        
+        for i = 1, math.min(3, #analysis.improvements) do
+            local improvementText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            improvementText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+            improvementText:SetWidth(600)
+            improvementText:SetText("|cFFFFAA88⚠ " .. analysis.improvements[i] .. "|r")
+            improvementText:SetJustifyH("LEFT")
+            table.insert(content.elements, improvementText)
+            yOffset = yOffset - 16
+        end
+    end
+end
+
+-- Update predictions analysis tab
+function MatchCreator:UpdateAnalysisPredictionsTab(runData, analysis)
+    local content = MatchCreatorAnalysisFrame.analysisTabContents[2]
+    self:ClearAnalysisTabContent(2)
+    
+    local yOffset = -10
+    
+    -- Predictions header
+    local headerText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    headerText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    headerText:SetText("|cFFFFD700Prediction vs Reality Analysis|r")
+    table.insert(content.elements, headerText)
+    yOffset = yOffset - 30
+    
+    if not runData.predictions then
+        local noPredText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        noPredText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        noPredText:SetText("|cFF888888No predictions were made for this run|r")
+        table.insert(content.elements, noPredText)
+        return
+    end
+    
+    -- Overall accuracy
+    local accuracyText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    accuracyText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    local accuracyColor = analysis.predictions.accuracy >= 80 and "|cFF00FF00" or
+                         analysis.predictions.accuracy >= 60 and "|cFFFFAA00" or "|cFFFF6666"
+    accuracyText:SetText(string.format("Overall Prediction Accuracy: %s%d%%|r", 
+        accuracyColor, math.floor(analysis.predictions.accuracy)))
+    table.insert(content.elements, accuracyText)
+    yOffset = yOffset - 30
+    
+    -- Correct predictions
+    if #analysis.predictions.correctPredictions > 0 then
+        local correctTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        correctTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        correctTitle:SetText("|cFF00FF00Accurate Predictions:|r")
+        table.insert(content.elements, correctTitle)
+        yOffset = yOffset - 20
+        
+        for _, prediction in ipairs(analysis.predictions.correctPredictions) do
+            local predText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            predText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+            predText:SetWidth(600)
+            predText:SetText("|cFF88FF88✓ " .. prediction.description .. "|r")
+            predText:SetJustifyH("LEFT")
+            table.insert(content.elements, predText)
+            yOffset = yOffset - 16
+        end
+        yOffset = yOffset - 10
+    end
+    
+    -- Incorrect predictions
+    if #analysis.predictions.incorrectPredictions > 0 then
+        local incorrectTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        incorrectTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        incorrectTitle:SetText("|cFFFF6666Missed Predictions:|r")
+        table.insert(content.elements, incorrectTitle)
+        yOffset = yOffset - 20
+        
+        for _, prediction in ipairs(analysis.predictions.incorrectPredictions) do
+            local predText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            predText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+            predText:SetWidth(600)
+            predText:SetText("|cFFFF8888✗ " .. prediction.description .. " (Reality: " .. prediction.reality .. ")|r")
+            predText:SetJustifyH("LEFT")
+            table.insert(content.elements, predText)
+            yOffset = yOffset - 16
+        end
+    end
+end
+
+-- Update performance analysis tab
+function MatchCreator:UpdateAnalysisPerformanceTab(runData, analysis)
+    local content = MatchCreatorAnalysisFrame.analysisTabContents[3]
+    self:ClearAnalysisTabContent(3)
+    
+    local yOffset = -10
+    
+    -- Performance header
+    local headerText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    headerText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    headerText:SetText("|cFFFFD700Detailed Performance Breakdown|r")
+    table.insert(content.elements, headerText)
+    yOffset = yOffset - 30
+    
+    -- Interrupt performance by player
+    local intTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    intTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    intTitle:SetText("|cFFFFAA00Interrupt Performance:|r")
+    table.insert(content.elements, intTitle)
+    yOffset = yOffset - 20
+    
+    if next(runData.performance.interrupts) then
+        for playerName, intData in pairs(runData.performance.interrupts) do
+            local successRate = intData.total > 0 and math.floor((intData.successful / intData.total) * 100) or 0
+            local playerIntText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            playerIntText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+            local intColor = successRate >= 80 and "|cFF00FF00" or successRate >= 60 and "|cFFFFAA00" or "|cFFFF6666"
+            playerIntText:SetText(string.format("%s: %s%d%% (%d/%d)|r", 
+                playerName, intColor, successRate, intData.successful, intData.total))
+            table.insert(content.elements, playerIntText)
+            yOffset = yOffset - 16
+        end
+    else
+        local noIntText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        noIntText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+        noIntText:SetText("|cFF888888No interrupt data recorded|r")
+        table.insert(content.elements, noIntText)
+        yOffset = yOffset - 16
+    end
+    yOffset = yOffset - 15
+    
+    -- Dispel performance by player
+    local dispelTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    dispelTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    dispelTitle:SetText("|cFFFFAA00Dispel Performance:|r")
+    table.insert(content.elements, dispelTitle)
+    yOffset = yOffset - 20
+    
+    if next(runData.performance.dispels) then
+        for playerName, dispelData in pairs(runData.performance.dispels) do
+            local successRate = dispelData.total > 0 and math.floor((dispelData.successful / dispelData.total) * 100) or 0
+            local playerDispelText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            playerDispelText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+            local dispelColor = successRate >= 90 and "|cFF00FF00" or successRate >= 70 and "|cFFFFAA00" or "|cFFFF6666"
+            playerDispelText:SetText(string.format("%s: %s%d%% (%d dispels)|r", 
+                playerName, dispelColor, successRate, dispelData.successful))
+            table.insert(content.elements, playerDispelText)
+            yOffset = yOffset - 16
+        end
+    else
+        local noDispelText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        noDispelText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+        noDispelText:SetText("|cFF888888No dispel data recorded|r")
+        table.insert(content.elements, noDispelText)
+        yOffset = yOffset - 16
+    end
+    yOffset = yOffset - 15
+    
+    -- Death analysis
+    local deathTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    deathTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    deathTitle:SetText("|cFFFFAA00Death Analysis:|r")
+    table.insert(content.elements, deathTitle)
+    yOffset = yOffset - 20
+    
+    if next(runData.performance.deaths) then
+        for playerName, deaths in pairs(runData.performance.deaths) do
+            local deathText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            deathText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+            local deathColor = deaths == 0 and "|cFF00FF00" or deaths == 1 and "|cFFFFAA00" or "|cFFFF6666"
+            deathText:SetText(string.format("%s: %s%d deaths|r", playerName, deathColor, deaths))
+            table.insert(content.elements, deathText)
+            yOffset = yOffset - 16
+        end
+    else
+        local noDeathText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        noDeathText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+        noDeathText:SetText("|cFF00FF00Flawless run - no deaths recorded!|r")
+        table.insert(content.elements, noDeathText)
+    end
+end
+
+-- Update recommendations tab
+function MatchCreator:UpdateAnalysisRecommendationsTab(runData, analysis)
+    local content = MatchCreatorAnalysisFrame.analysisTabContents[4]
+    self:ClearAnalysisTabContent(4)
+    
+    local yOffset = -10
+    
+    -- Recommendations header
+    local headerText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    headerText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    headerText:SetText("|cFFFFD700Recommendations for Future Runs|r")
+    table.insert(content.elements, headerText)
+    yOffset = yOffset - 30
+    
+    -- Composition recommendations
+    if #analysis.recommendations > 0 then
+        local compTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        compTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        compTitle:SetText("|cFF00FF00Group Composition Suggestions:|r")
+        table.insert(content.elements, compTitle)
+        yOffset = yOffset - 20
+        
+        for _, recommendation in ipairs(analysis.recommendations) do
+            local recText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            recText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+            recText:SetWidth(600)
+            recText:SetText("|cFF88DDFF• " .. recommendation .. "|r")
+            recText:SetJustifyH("LEFT")
+            table.insert(content.elements, recText)
+            yOffset = yOffset - (recText:GetStringHeight() + 5)
+        end
+        yOffset = yOffset - 15
+    end
+    
+    -- Player development suggestions
+    local devTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    devTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    devTitle:SetText("|cFFFFAA00Player Development Areas:|r")
+    table.insert(content.elements, devTitle)
+    yOffset = yOffset - 20
+    
+    -- Generate player-specific feedback
+    local playerFeedback = self:GeneratePlayerFeedback(runData, analysis)
+    for playerName, feedback in pairs(playerFeedback) do
+        local playerTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        playerTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+        playerTitle:SetText("|cFFFFD700" .. playerName .. ":|r")
+        table.insert(content.elements, playerTitle)
+        yOffset = yOffset - 18
+        
+        for _, suggestion in ipairs(feedback) do
+            local suggestionText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+            suggestionText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 30, yOffset)
+            suggestionText:SetWidth(590)
+            suggestionText:SetText("• " .. suggestion)
+            suggestionText:SetJustifyH("LEFT")
+            table.insert(content.elements, suggestionText)
+            yOffset = yOffset - (suggestionText:GetStringHeight() + 3)
+        end
+        yOffset = yOffset - 10
+    end
+    
+    -- Set content height
+    content.child:SetHeight(math.abs(yOffset) + 50)
+end
+
+-- Analysis tab selection
+function MatchCreator:SelectAnalysisTab(tabIndex)
+    local frame = MatchCreatorAnalysisFrame
+    if not frame then return end
+    
+    -- Hide all tabs
+    for i, content in ipairs(frame.analysisTabContents) do
+        content.frame:Hide()
+        PanelTemplates_DeselectTab(frame.analysisTabs[i])
+    end
+    
+    -- Show selected tab
+    frame.analysisTabContents[tabIndex].frame:Show()
+    PanelTemplates_SelectTab(frame.analysisTabs[tabIndex])
+    frame.activeAnalysisTab = tabIndex
+end
+
+-- Clear analysis tab content
+function MatchCreator:ClearAnalysisTabContent(tabIndex)
+    local content = MatchCreatorAnalysisFrame.analysisTabContents[tabIndex]
+    if content.elements then
+        for _, element in pairs(content.elements) do
+            if element.Hide then
+                element:Hide()
+            end
+        end
+    end
+    content.elements = {}
+end
+
+-- Helper functions for combat analytics
+
+-- Generate player-specific feedback
+function MatchCreator:GeneratePlayerFeedback(runData, analysis)
+    local feedback = {}
+    
+    -- Interrupt feedback
+    for playerName, intData in pairs(runData.performance.interrupts) do
+        if not feedback[playerName] then feedback[playerName] = {} end
+        
+        local successRate = intData.total > 0 and (intData.successful / intData.total) * 100 or 0
+        if successRate < 60 then
+            table.insert(feedback[playerName], "Practice interrupt timing - success rate was " .. math.floor(successRate) .. "%")
+        elseif successRate >= 90 then
+            table.insert(feedback[playerName], "Excellent interrupt performance!")
+        end
+    end
+    
+    -- Death feedback
+    for playerName, deaths in pairs(runData.performance.deaths) do
+        if not feedback[playerName] then feedback[playerName] = {} end
+        
+        if deaths == 0 then
+            table.insert(feedback[playerName], "Perfect survivability - no deaths!")
+        elseif deaths >= 3 then
+            table.insert(feedback[playerName], "Focus on positioning and damage avoidance")
+        end
+    end
+    
+    return feedback
+end
+
+-- Check if spell should be interrupted
+function MatchCreator:IsInterruptibleSpell(spellId)
+    local interruptibleSpells = {
+        -- Common interruptible spells across dungeons
+        [spellId] = true -- This would be populated with actual spell IDs
+    }
+    return interruptibleSpells[spellId] or false
+end
+
+-- Check if unit is a party member
+function MatchCreator:IsPartyMember(unitGUID)
+    if not unitGUID then return false end
+    
+    -- Check player
+    if UnitGUID("player") == unitGUID then return true end
+    
+    -- Check party members
+    for i = 1, 4 do
+        if UnitExists("party" .. i) and UnitGUID("party" .. i) == unitGUID then
+            return true
+        end
+    end
+    
+    return false
+end
+
+-- Add combat analytics commands
+local originalSlashHandler = SlashCmdList["MATCHCREATOR"]
+SlashCmdList["MATCHCREATOR"] = function(msg)
+    local args = {strsplit(" ", msg)}
+    local cmd = args[1] and string.lower(args[1]) or ""
+    
+    if cmd == "analytics" then
+        MatchCreator:InitializeCombatAnalytics()
+        print("|cFF00FF96Combat Analytics:|r System initialized and ready!")
+        
+    elseif cmd == "starttrack" then
+        MatchCreator:StartRunTracking()
+        
+    elseif cmd == "endtrack" then
+        MatchCreator:EndRunTracking(true, nil)
+        
+    elseif cmd == "history" then
+        MatchCreator:ShowRunHistory()
+        
+    elseif cmd == "liveui" then
+        if MatchCreator.combatAnalytics.liveTracking then
+            MatchCreator:ShowLiveTrackingFrame()
+        else
+            print("|cFFFF0000Error:|r No active run tracking")
+        end
+        
+    else
+        -- Call original handler for other commands
+        originalSlashHandler(msg)
+    end
+end
+
+-- Advanced UI & Visualization System
+MatchCreator.visualization = {
+    renderer = nil,
+    scene = nil,
+    camera = nil,
+    controls = nil,
+    groupNodes = {},
+    synergyLines = {},
+    heatMaps = {},
+    timelines = {},
+    animations = {}
+}
+
+-- Initialize 3D Visualization System
+function MatchCreator:InitializeVisualization()
+    self.visualization = {
+        renderer = nil,
+        scene = nil,
+        camera = nil,
+        controls = nil,
+        groupNodes = {},
+        synergyLines = {},
+        heatMaps = {},
+        timelines = {},
+        animations = {},
+        isInitialized = false
+    }
+    
+    -- Load Three.js and initialize 3D system
+    self:LoadThreeJS()
+end
+
+-- Load Three.js and initialize 3D rendering
+function MatchCreator:LoadThreeJS()
+    -- Create 3D visualization frame
+    if MatchCreator3DFrame then return end
+    
+    local frame = CreateFrame("Frame", "MatchCreator3DFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame:SetSize(900, 700)
+    frame:SetPoint("CENTER", 0, 0)
+    frame.title = frame:CreateFontString(nil, "OVERLAY")
+    frame.title:SetFontObject("GameFontHighlight")
+    frame.title:SetPoint("LEFT", frame.TitleBg, "LEFT", 5, 0)
+    frame.title:SetText("Match Creator - 3D Group Visualizer")
+    
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    
+    -- Create HTML frame for Three.js rendering
+    local htmlFrame = CreateFrame("Frame", "MatchCreator3DCanvas", frame)
+    htmlFrame:SetPoint("TOPLEFT", frame.Inset, "TOPLEFT", 4, -4)
+    htmlFrame:SetPoint("BOTTOMRIGHT", frame.Inset, "BOTTOMRIGHT", -4, 4)
+    htmlFrame:SetFrameLevel(1)
+    
+    -- Initialize Three.js in HTML frame (pseudo-code for concept)
+    frame.canvas = htmlFrame
+    frame.canvas:SetScript("OnShow", function()
+        MatchCreator:Initialize3DScene()
+    end)
+    
+    -- Create control panel
+    self:Create3DControlPanel(frame)
+    
+    frame:Hide()
+    
+    print("|cFF00CCFF3D Visualizer:|r System initialized!")
+end
+
+-- Create 3D control panel
+function MatchCreator:Create3DControlPanel(frame)
+    local controlPanel = CreateFrame("Frame", nil, frame)
+    controlPanel:SetSize(200, 600)
+    controlPanel:SetPoint("RIGHT", frame, "RIGHT", -10, 0)
+    
+    -- Background
+    local bg = controlPanel:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.1, 0.1, 0.1, 0.9)
+    
+    local yOffset = -10
+    
+    -- Visualization mode selector
+    local modeTitle = controlPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    modeTitle:SetPoint("TOP", controlPanel, "TOP", 0, yOffset)
+    modeTitle:SetText("|cFFFFD700Visualization Mode|r")
+    yOffset = yOffset - 25
+    
+    -- Mode buttons
+    local modes = {
+        {name = "Group Synergy", func = "ShowGroupSynergy3D"},
+        {name = "Performance Heat", func = "ShowPerformanceHeat3D"},
+        {name = "Timeline Prediction", func = "ShowTimelinePrediction3D"},
+        {name = "Dungeon Analysis", func = "ShowDungeonAnalysis3D"}
+    }
+    
+    for _, mode in ipairs(modes) do
+        local modeBtn = CreateFrame("Button", nil, controlPanel, "GameMenuButtonTemplate")
+        modeBtn:SetPoint("TOP", controlPanel, "TOP", 0, yOffset)
+        modeBtn:SetSize(180, 25)
+        modeBtn:SetText(mode.name)
+        modeBtn:SetScript("OnClick", function()
+            MatchCreator[mode.func](MatchCreator)
+        end)
+        yOffset = yOffset - 35
+    end
+    
+    yOffset = yOffset - 20
+    
+    -- Dungeon selector
+    local dungeonTitle = controlPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    dungeonTitle:SetPoint("TOP", controlPanel, "TOP", 0, yOffset)
+    dungeonTitle:SetText("|cFFFFAA00Select Dungeon|r")
+    yOffset = yOffset - 25
+    
+    local dungeonDropdown = CreateFrame("Frame", "MC3DDungeonDropdown", controlPanel, "UIDropDownMenuTemplate")
+    dungeonDropdown:SetPoint("TOP", controlPanel, "TOP", 0, yOffset - 5)
+    
+    local dungeonOptions = {}
+    for dungeonName, _ in pairs(self.dungeonData) do
+        table.insert(dungeonOptions, {text = dungeonName, value = dungeonName})
+    end
+    
+    local function DungeonDropdown_OnClick(self)
+        UIDropDownMenu_SetSelectedValue(dungeonDropdown, self.value)
+        MatchCreator.selected3DDungeon = self.value
+        MatchCreator:Refresh3DVisualization()
+    end
+    
+    local function DungeonDropdown_Initialize(self, level)
+        for _, option in ipairs(dungeonOptions) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = option.text
+            info.value = option.value
+            info.func = DungeonDropdown_OnClick
+            UIDropDownMenu_AddButton(info, level)
+        end
+    end
+    
+    UIDropDownMenu_Initialize(dungeonDropdown, DungeonDropdown_Initialize)
+    UIDropDownMenu_SetWidth(dungeonDropdown, 170)
+    yOffset = yOffset - 40
+    
+    -- Animation controls
+    local animTitle = controlPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    animTitle:SetPoint("TOP", controlPanel, "TOP", 0, yOffset)
+    animTitle:SetText("|cFF88DDFF3D Controls|r")
+    yOffset = yOffset - 25
+    
+    -- Play/Pause animation
+    local playBtn = CreateFrame("Button", nil, controlPanel, "GameMenuButtonTemplate")
+    playBtn:SetPoint("TOP", controlPanel, "TOP", -45, yOffset)
+    playBtn:SetSize(80, 25)
+    playBtn:SetText("Play")
+    playBtn:SetScript("OnClick", function()
+        MatchCreator:Toggle3DAnimation()
+    end)
+    
+    local resetBtn = CreateFrame("Button", nil, controlPanel, "GameMenuButtonTemplate")
+    resetBtn:SetPoint("TOP", controlPanel, "TOP", 45, yOffset)
+    resetBtn:SetSize(80, 25)
+    resetBtn:SetText("Reset")
+    resetBtn:SetScript("OnClick", function()
+        MatchCreator:Reset3DView()
+    end)
+    
+    yOffset = yOffset - 40
+    
+    -- Detail level slider
+    local detailLabel = controlPanel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    detailLabel:SetPoint("TOP", controlPanel, "TOP", 0, yOffset)
+    detailLabel:SetText("Detail Level:")
+    
+    local detailSlider = CreateFrame("Slider", "MC3DDetailSlider", controlPanel, "OptionsSliderTemplate")
+    detailSlider:SetPoint("TOP", controlPanel, "TOP", 0, yOffset - 20)
+    detailSlider:SetMinMaxValues(1, 5)
+    detailSlider:SetValue(3)
+    detailSlider:SetValueStep(1)
+    detailSlider:SetWidth(160)
+    MC3DDetailSliderLow:SetText("Low")
+    MC3DDetailSliderHigh:SetText("High")
+    MC3DDetailSliderText:SetText("Medium")
+    
+    detailSlider:SetScript("OnValueChanged", function(self, value)
+        local levels = {"Low", "Low+", "Medium", "High-", "High"}
+        MC3DDetailSliderText:SetText(levels[value])
+        MatchCreator:Set3DDetailLevel(value)
+    end)
+    
+    frame.controlPanel = controlPanel
+end
+
+-- Initialize 3D Scene (conceptual - would use actual Three.js)
+function MatchCreator:Initialize3DScene()
+    if self.visualization.isInitialized then return end
+    
+    -- Conceptual Three.js initialization
+    self.visualization.scene = "THREE.Scene()"
+    self.visualization.camera = "THREE.PerspectiveCamera(75, aspect, 0.1, 1000)"
+    self.visualization.renderer = "THREE.WebGLRenderer({antialias: true})"
+    
+    -- Set up lighting
+    self:Setup3DLighting()
+    
+    -- Initialize materials
+    self:Initialize3DMaterials()
+    
+    self.visualization.isInitialized = true
+    
+    -- Start with group synergy view
+    self:ShowGroupSynergy3D()
+end
+
+-- 3D Group Synergy Visualizer
+function MatchCreator:ShowGroupSynergy3D()
+    -- Clear existing visualization
+    self:Clear3DScene()
+    
+    local groupComp = self:AnalyzeCurrentGroupDetailed()
+    if not groupComp then
+        self:Show3DMessage("No group composition data available")
+        return
+    end
+    
+    local dungeonName = self.selected3DDungeon or self:GetCurrentDungeon()
+    if not dungeonName then
+        self:Show3DMessage("Select a dungeon to analyze")
+        return
+    end
+    
+    -- Create 3D representation of group
+    self:Create3DGroupNodes(groupComp, dungeonName)
+    
+    -- Create synergy connections
+    self:Create3DSynergyLines(groupComp, dungeonName)
+    
+    -- Add floating information panels
+    self:Create3DInfoPanels(groupComp, dungeonName)
+    
+    -- Start synergy animation
+    self:Animate3DSynergies()
+end
+
+-- Create 3D nodes for each group member
+function MatchCreator:Create3DGroupNodes(groupComp, dungeonName)
+    self.visualization.groupNodes = {}
+    
+    -- Node positions in 3D space (pentagon formation)
+    local positions = {
+        tank = {x = 0, y = 0, z = 2},      -- Front center
+        healer = {x = -2, y = 0, z = -1},  -- Back left
+        dps1 = {x = 2, y = 0, z = -1},     -- Back right
+        dps2 = {x = -1, y = 0, z = 0},     -- Mid left
+        dps3 = {x = 1, y = 0, z = 0}       -- Mid right
+    }
+    
+    local roleIndex = {dps = 1}
+    
+    for role, members in pairs(groupComp) do
+        if type(members) == "table" then
+            for _, member in ipairs(members) do
+                local nodePos = positions.tank
+                
+                if role == "healers" then
+                    nodePos = positions.healer
+                elseif role == "dps" then
+                    nodePos = positions["dps" .. roleIndex.dps]
+                    roleIndex.dps = roleIndex.dps + 1
+                end
+                
+                -- Create 3D node (conceptual Three.js geometry)
+                local node = self:Create3DPlayerNode(member, nodePos, role, dungeonName)
+                table.insert(self.visualization.groupNodes, node)
+            end
+        end
+    end
+end
+
+-- Create individual 3D player node
+function MatchCreator:Create3DPlayerNode(member, position, role, dungeonName)
+    -- Get performance rating for this spec in selected dungeon
+    local rating = self:GetSpecDungeonRating(member.class, member.spec, role, dungeonName)
+    
+    -- Node appearance based on performance rating
+    local nodeData = {
+        member = member,
+        position = position,
+        role = role,
+        rating = rating,
+        geometry = "THREE.SphereGeometry(0.3, 32, 32)", -- Conceptual
+        material = self:Get3DNodeMaterial(rating, role),
+        animations = {},
+        infoPanel = nil
+    }
+    
+    -- Add pulsing animation based on effectiveness
+    if rating >= 90 then
+        nodeData.animations.pulse = {color = "gold", intensity = 0.8, speed = 1.5}
+    elseif rating >= 80 then
+        nodeData.animations.pulse = {color = "green", intensity = 0.6, speed = 1.2}
+    elseif rating >= 70 then
+        nodeData.animations.pulse = {color = "yellow", intensity = 0.4, speed = 1.0}
+    else
+        nodeData.animations.pulse = {color = "red", intensity = 0.3, speed = 0.8}
+    end
+    
+    -- Add floating name/spec text
+    nodeData.label = self:Create3DTextLabel(
+        member.name .. "\n" .. member.class .. " " .. member.spec,
+        {x = position.x, y = position.y + 0.6, z = position.z}
+    )
+    
+    return nodeData
+end
+
+-- Create 3D synergy connection lines
+function MatchCreator:Create3DSynergyLines(groupComp, dungeonName)
+    self.visualization.synergyLines = {}
+    
+    local nodes = self.visualization.groupNodes
+    
+    -- Calculate synergy between each pair of players
+    for i = 1, #nodes do
+        for j = i + 1, #nodes do
+            local synergy = self:Calculate3DSynergy(nodes[i], nodes[j], dungeonName)
+            
+            if synergy > 0.3 then -- Only show meaningful synergies
+                local line = self:Create3DSynergyLine(nodes[i], nodes[j], synergy)
+                table.insert(self.visualization.synergyLines, line)
+            end
+        end
+    end
+end
+
+-- Create synergy line between two nodes
+function MatchCreator:Create3DSynergyLine(node1, node2, synergyStrength)
+    -- Line color and thickness based on synergy strength
+    local color, thickness
+    if synergyStrength >= 0.8 then
+        color = "0x00FF00" -- Bright green for excellent synergy
+        thickness = 0.08
+    elseif synergyStrength >= 0.6 then
+        color = "0xFFFF00" -- Yellow for good synergy  
+        thickness = 0.06
+    else
+        color = "0xFF6600" -- Orange for moderate synergy
+        thickness = 0.04
+    end
+    
+    local lineData = {
+        start = node1.position,
+        end = node2.position,
+        color = color,
+        thickness = thickness,
+        synergyStrength = synergyStrength,
+        geometry = "THREE.CylinderGeometry(thickness, thickness, distance)", -- Conceptual
+        animation = {
+            flow = true, -- Energy flowing along the line
+            speed = synergyStrength * 2,
+            particles = math.floor(synergyStrength * 10)
+        }
+    }
+    
+    return lineData
+end
+
+-- Performance Heat Map Visualization
+function MatchCreator:ShowPerformanceHeat3D()
+    self:Clear3DScene()
+    
+    -- Create 3D heat map of spec performance across all dungeons
+    local heatMapData = self:Generate3DHeatMapData()
+    
+    -- Create 3D grid of performance cubes
+    self:Create3DHeatMapGrid(heatMapData)
+    
+    -- Add interactive tooltips
+    self:Add3DHeatMapTooltips(heatMapData)
+    
+    -- Create legend and axes
+    self:Create3DHeatMapLegend()
+end
+
+-- Generate heat map data
+function MatchCreator:Generate3DHeatMapData()
+    local heatMap = {}
+    
+    -- Create matrix: [Spec][Dungeon] = Performance Rating
+    local specList = {}
+    local dungeonList = {}
+    
+    -- Collect all specs and dungeons
+    for dungeonName, dungeonData in pairs(self.dungeonData) do
+        table.insert(dungeonList, dungeonName)
+        
+        for role, specs in pairs(dungeonData.preferredSpecs) do
+            for specName, rating in pairs(specs) do
+                if not specList[specName] then
+                    table.insert(specList, specName)
+                    specList[specName] = true
+                end
+            end
+        end
+    end
+    
+    -- Generate heat map matrix
+    for specIndex, specName in ipairs(specList) do
+        if type(specName) == "string" then
+            heatMap[specIndex] = {}
+            
+            for dungeonIndex, dungeonName in ipairs(dungeonList) do
+                local rating = 0
+                local dungeonData = self.dungeonData[dungeonName]
+                
+                -- Find rating in any role
+                for role, specs in pairs(dungeonData.preferredSpecs) do
+                    if specs[specName] then
+                        rating = specs[specName]
+                        break
+                    end
+                end
+                
+                heatMap[specIndex][dungeonIndex] = {
+                    spec = specName,
+                    dungeon = dungeonName,
+                    rating = rating,
+                    position = {
+                        x = (specIndex - #specList/2) * 0.8,
+                        y = (rating / 100) * 3, -- Height based on rating
+                        z = (dungeonIndex - #dungeonList/2) * 0.8
+                    }
+                }
+            end
+        end
+    end
+    
+    return {
+        data = heatMap,
+        specs = specList,
+        dungeons = dungeonList
+    }
+end
+
+-- Create 3D heat map grid
+function MatchCreator:Create3DHeatMapGrid(heatMapData)
+    self.visualization.heatMaps = {}
+    
+    for specIndex, dungeonData in pairs(heatMapData.data) do
+        for dungeonIndex, cellData in pairs(dungeonData) do
+            -- Create cube for each spec/dungeon combination
+            local cube = self:Create3DHeatMapCube(cellData)
+            table.insert(self.visualization.heatMaps, cube)
+        end
+    end
+    
+    -- Add grid lines
+    self:Create3DGridLines(heatMapData)
+    
+    -- Add axis labels
+    self:Create3DAxisLabels(heatMapData)
+end
+
+-- Create individual heat map cube
+function MatchCreator:Create3DHeatMapCube(cellData)
+    local height = (cellData.rating / 100) * 2 + 0.1 -- Min height 0.1
+    
+    -- Color based on performance rating
+    local color
+    if cellData.rating >= 90 then
+        color = "0x00FF00" -- Bright green
+    elseif cellData.rating >= 80 then
+        color = "0x88FF00" -- Yellow-green
+    elseif cellData.rating >= 70 then
+        color = "0xFFFF00" -- Yellow
+    elseif cellData.rating >= 60 then
+        color = "0xFF8800" -- Orange
+    else
+        color = "0xFF0000" -- Red
+    end
+    
+    local cubeData = {
+        cellData = cellData,
+        geometry = "THREE.BoxGeometry(0.6, " .. height .. ", 0.6)", -- Conceptual
+        material = "THREE.MeshLambertMaterial({color: " .. color .. "})",
+        position = cellData.position,
+        height = height,
+        color = color,
+        animations = {
+            hover = true,
+            selection = false
+        }
+    }
+    
+    return cubeData
+end
+
+-- Timeline Prediction Visualizer
+function MatchCreator:ShowTimelinePrediction3D()
+    self:Clear3DScene()
+    
+    local groupComp = self:AnalyzeCurrentGroupDetailed()
+    local dungeonName = self.selected3DDungeon or self:GetCurrentDungeon()
+    
+    if not groupComp or not dungeonName then
+        self:Show3DMessage("Group composition and dungeon required for timeline prediction")
+        return
+    end
+    
+    -- Generate timeline predictions for key levels +15 to +25
+    local timelineData = self:GenerateTimelinePredictions(groupComp, dungeonName)
+    
+    -- Create 3D timeline visualization
+    self:Create3DTimelineGraph(timelineData)
+    
+    -- Add interactive scrubbing
+    self:Add3DTimelineControls(timelineData)
+end
+
+-- Generate timeline prediction data
+function MatchCreator:GenerateTimelinePredictions(groupComp, dungeonName)
+    local timeline = {}
+    
+    for keyLevel = 15, 25 do
+        local prediction = self:PredictGroupPerformance(groupComp, dungeonName, keyLevel)
+        
+        table.insert(timeline, {
+            keyLevel = keyLevel,
+            successChance = prediction.successChance,
+            expectedTime = prediction.expectedTime,
+            difficultyFactors = prediction.difficultyFactors,
+            recommendations = prediction.recommendations,
+            position = {
+                x = (keyLevel - 20) * 1.5, -- Center around +20
+                y = (prediction.successChance / 100) * 4, -- Height = success chance
+                z = (prediction.expectedTime - 20) * 0.1 -- Depth = time variation
+            }
+        })
+    end
+    
+    return timeline
+end
+
+-- Create 3D timeline graph
+function MatchCreator:Create3DTimelineGraph(timelineData)
+    self.visualization.timelines = {}
+    
+    -- Create timeline points
+    for i, point in ipairs(timelineData) do
+        local timelinePoint = self:Create3DTimelinePoint(point, i)
+        table.insert(self.visualization.timelines, timelinePoint)
+    end
+    
+    -- Connect points with curves
+    self:Create3DTimelineCurves(timelineData)
+    
+    -- Add prediction labels
+    self:Create3DTimelineLabels(timelineData)
+end
+
+-- Create individual timeline point
+function MatchCreator:Create3DTimelinePoint(pointData, index)
+    -- Color based on success chance
+    local color
+    if pointData.successChance >= 80 then
+        color = "0x00FF00" -- Green for high success
+    elseif pointData.successChance >= 60 then
+        color = "0xFFFF00" -- Yellow for moderate
+    else
+        color = "0xFF0000" -- Red for low success
+    end
+    
+    local pointGeometry = {
+        data = pointData,
+        geometry = "THREE.SphereGeometry(0.15, 16, 16)", -- Conceptual
+        material = "THREE.MeshLambertMaterial({color: " .. color .. "})",
+        position = pointData.position,
+        color = color,
+        label = "+" .. pointData.keyLevel .. " (" .. pointData.successChance .. "%)",
+        animations = {
+            pulse = true,
+            highlight = false
+        }
+    }
+    
+    return pointGeometry
+end
+
+-- Advanced 3D Interaction System
+function MatchCreator:Initialize3DInteractions()
+    -- Mouse hover detection
+    self.visualization.mouseHandler = {
+        hoveredObject = nil,
+        selectedObject = nil,
+        tooltipPanel = nil
+    }
+    
+    -- Click handlers
+    self:Setup3DClickHandlers()
+    
+    -- Keyboard shortcuts
+    self:Setup3DKeyboardControls()
+end
+
+-- Show 3D Visualization UI
+function MatchCreator:Show3DVisualizationFrame()
+    if not MatchCreator3DFrame then
+        self:InitializeVisualization()
+        self:Initialize3DInteractions()
+    end
+    
+    MatchCreator3DFrame:Show()
+    
+    -- Start with current group analysis if available
+    local groupComp = self:AnalyzeCurrentGroupDetailed()
+    if groupComp then
+        self:ShowGroupSynergy3D()
+    else
+        self:ShowPerformanceHeat3D()
+    end
+end
+
+-- Helper functions for 3D visualization
+
+-- Calculate synergy between two players
+function MatchCreator:Calculate3DSynergy(node1, node2, dungeonName)
+    local synergy = 0
+    
+    -- Base synergy from role compatibility
+    local roleCompatibility = {
+        [node1.role] = {[node2.role] = 0.5} -- Default moderate synergy
+    }
+    
+    -- Enhanced synergy for specific combinations
+    if (node1.role == "tank" and node2.role == "healer") or
+       (node1.role == "healer" and node2.role == "tank") then
+        synergy = synergy + 0.8 -- High tank/healer synergy
+    end
+    
+    -- Utility synergy (e.g., both have interrupts)
+    local utilities1 = self:GetSpecUtilities(node1.member.class .. "_" .. node1.member.spec, node1.role)
+    local utilities2 = self:GetSpecUtilities(node2.member.class .. "_" .. node2.member.spec, node2.role)
+    
+    if utilities1 and utilities2 then
+        if string.find(utilities1, "Interrupt") and string.find(utilities2, "Interrupt") then
+            synergy = synergy + 0.3 -- Good interrupt coverage
+        end
+    end
+    
+    -- Dungeon-specific synergy
+    local dungeonData = self.dungeonData[dungeonName]
+    if dungeonData then
+        -- Add synergy based on dungeon requirements
+        local mechanics = dungeonData.mechanics
+        if mechanics.interrupt >= 80 and utilities1 and utilities2 then
+            if string.find(utilities1, "Interrupt") and string.find(utilities2, "Interrupt") then
+                synergy = synergy + 0.4 -- Critical for high interrupt dungeons
+            end
+        end
+    end
+    
+    return math.min(1.0, synergy)
+end
+
+-- Get spec rating for specific dungeon
+function MatchCreator:GetSpecDungeonRating(class, spec, role, dungeonName)
+    local dungeonData = self.dungeonData[dungeonName]
+    if not dungeonData then return 60 end
+    
+    local specKey = class .. "_" .. spec
+    local roleSpecs = dungeonData.preferredSpecs[role]
+    
+    if roleSpecs and roleSpecs[specKey] then
+        return roleSpecs[specKey]
+    end
+    
+    return 60 -- Default rating
+end
+
+-- Clear 3D scene
+function MatchCreator:Clear3DScene()
+    -- Remove all existing 3D objects (conceptual)
+    self.visualization.groupNodes = {}
+    self.visualization.synergyLines = {}
+    self.visualization.heatMaps = {}
+    self.visualization.timelines = {}
+end
+
+-- Show message in 3D space
+function MatchCreator:Show3DMessage(message)
+    -- Display 3D text message in scene center (conceptual)
+    local messageObject = {
+        text = message,
+        position = {x = 0, y = 0, z = 0},
+        color = "0xFFFFFF",
+        size = 0.5
+    }
+end
+
+-- Add 3D visualization commands
+local originalSlashHandler = SlashCmdList["MATCHCREATOR"]
+SlashCmdList["MATCHCREATOR"] = function(msg)
+    local args = {strsplit(" ", msg)}
+    local cmd = args[1] and string.lower(args[1]) or ""
+    
+    if cmd == "3d" or cmd == "visualizer" then
+        MatchCreator:Show3DVisualizationFrame()
+        
+    elseif cmd == "synergy" then
+        MatchCreator:Show3DVisualizationFrame()
+        C_Timer.After(0.5, function()
+            MatchCreator:ShowGroupSynergy3D()
+        end)
+        
+    elseif cmd == "heatmap" then
+        MatchCreator:Show3DVisualizationFrame()
+        C_Timer.After(0.5, function()
+            MatchCreator:ShowPerformanceHeat3D()
+        end)
+        
+    elseif cmd == "timeline" then
+        MatchCreator:Show3DVisualizationFrame()
+        C_Timer.After(0.5, function()
+            MatchCreator:ShowTimelinePrediction3D()
+        end)
+        
+    elseif cmd == "3dhelp" then
+        print("|cFF00CCFF3D Visualizer Commands:|r")
+        print("/mc 3d - Open 3D Group Visualizer")
+        print("/mc synergy - Show 3D group synergy view")
+        print("/mc heatmap - Show performance heat map")
+        print("/mc timeline - Show timeline predictions")
+        print("")
+        print("|cFFAADDFF3D Controls:|r")
+        print("Mouse: Rotate view | Wheel: Zoom | Click: Select objects")
+        print("WASD: Move camera | Space: Reset view")
+        
+    else
+        -- Call original handler for other commands
+        originalSlashHandler(msg)
+    end
+end-- Calculate guild statistics
 function MatchCreator:CalculateGuildStats()
     local stats = {
         total = 0,
@@ -111,7 +1904,1063 @@ function MatchCreator:CreatePlayerCard(parent, profile, yOffset)
     -- Preferred roles
     local rolesText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     rolesText:SetPoint("LEFT", onlineIndicator, "RIGHT", 8, -8)
-    local roleStr = table.concat(profile.mythicPlusData.preferre-- Helper functions for smart suggestions
+    local roleStr = table.concat(profile.mythicPlusData.preferredRoles, ", ")
+    rolesText:SetText("|cFF888888Roles: " .. roleStr .. "|r")
+    
+    -- Skill level and reliability
+    local skillText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    skillText:SetPoint("LEFT", nameText, "RIGHT", 20, 0)
+    local skillColor = profile.performance.skillLevel >= 80 and "|cFF00FF00" or 
+                      profile.performance.skillLevel >= 60 and "|cFFFFAA00" or "|cFFFF6666"
+    skillText:SetText(skillColor .. "Skill: " .. profile.performance.skillLevel .. "%|r")
+    
+    -- Experience level
+    local expText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    expText:SetPoint("LEFT", skillText, "RIGHT", 20, 0)
+    expText:SetText("|cFF88AAFF" .. profile.mythicPlusData.experience .. "|r")
+    
+    -- Key level
+    local keyText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    keyText:SetPoint("LEFT", expText, "RIGHT", 20, 0)
+    if profile.mythicPlusData.keyLevel > 0 then
+        keyText:SetText("|cFFFFD700+" .. profile.mythicPlusData.keyLevel .. "|r")
+    else
+        keyText:SetText("|cFF666666No Key|r")
+    end
+    
+    -- Action buttons
+    local inviteBtn = CreateFrame("Button", nil, card, "GameMenuButtonTemplate")
+    inviteBtn:SetPoint("RIGHT", card, "RIGHT", -10, 0)
+    inviteBtn:SetSize(60, 20)
+    inviteBtn:SetText("Invite")
+    inviteBtn:SetScript("OnClick", function()
+        InviteUnit(profile.name)
+    end)
+    
+    local whisperBtn = CreateFrame("Button", nil, card, "GameMenuButtonTemplate")
+    whisperBtn:SetPoint("RIGHT", inviteBtn, "LEFT", -5, 0)
+    whisperBtn:SetSize(60, 20)
+    whisperBtn:SetText("Whisper")
+    whisperBtn:SetScript("OnClick", function()
+        ChatFrame_SendTell(profile.name)
+    end)
+    
+    return card
+end
+
+-- Update guild teams tab
+function MatchCreator:UpdateGuildTeamsTab()
+    local content = MatchCreatorGuildFrame.guildTabContents[2]
+    self:ClearGuildTabContent(2)
+    
+    local yOffset = -10
+    
+    -- Teams header
+    local teamsTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    teamsTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    teamsTitle:SetText("|cFFFFD700Guild M+ Teams|r")
+    table.insert(content.elements, teamsTitle)
+    yOffset = yOffset - 30
+    
+    -- Create new team button
+    local newTeamBtn = CreateFrame("Button", nil, content.child, "GameMenuButtonTemplate")
+    newTeamBtn:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    newTeamBtn:SetSize(120, 25)
+    newTeamBtn:SetText("Create New Team")
+    newTeamBtn:SetScript("OnClick", function()
+        MatchCreator:ShowCreateTeamDialog()
+    end)
+    table.insert(content.elements, newTeamBtn)
+    yOffset = yOffset - 40
+    
+    -- Display existing teams
+    for teamName, teamData in pairs(self.guildPlanner.teams) do
+        local teamCard = self:CreateTeamCard(content.child, teamName, teamData, yOffset)
+        table.insert(content.elements, teamCard)
+        yOffset = yOffset - 120
+    end
+    
+    -- If no teams exist
+    if not next(self.guildPlanner.teams) then
+        local noTeamsText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        noTeamsText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        noTeamsText:SetText("|cFF888888No teams created yet. Create your first M+ team above!|r")
+        table.insert(content.elements, noTeamsText)
+    end
+end
+
+-- Create team card display
+function MatchCreator:CreateTeamCard(parent, teamName, teamData, yOffset)
+    local card = CreateFrame("Frame", nil, parent)
+    card:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, yOffset)
+    card:SetSize(700, 110)
+    
+    -- Background
+    local bg = card:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.15, 0.15, 0.2, 0.8)
+    
+    -- Team name
+    local teamNameText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    teamNameText:SetPoint("TOPLEFT", card, "TOPLEFT", 10, -10)
+    teamNameText:SetText("|cFFFFD700" .. teamName .. "|r")
+    
+    -- Team composition
+    local yPos = -35
+    local roles = {"tank", "healer", "dps"}
+    local roleColors = {tank = "|cFF4A9EFF", healer = "|cFF40FF40", dps = "|cFFFF6347"}
+    
+    for _, role in ipairs(roles) do
+        local roleText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        roleText:SetPoint("TOPLEFT", card, "TOPLEFT", 15, yPos)
+        roleText:SetText(roleColors[role] .. string.upper(role) .. ":|r")
+        
+        local members = teamData.members[role] or {}
+        local memberNames = {}
+        for _, member in ipairs(members) do
+            table.insert(memberNames, member.name)
+        end
+        
+        local membersText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        membersText:SetPoint("LEFT", roleText, "RIGHT", 10, 0)
+        membersText:SetWidth(200)
+        if #memberNames > 0 then
+            membersText:SetText(table.concat(memberNames, ", "))
+        else
+            membersText:SetText("|cFF666666Empty|r")
+        end
+        
+        yPos = yPos - 18
+    end
+    
+    -- Team stats
+    local statsText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statsText:SetPoint("RIGHT", card, "RIGHT", -200, 20)
+    local avgSkill = self:CalculateTeamAverageSkill(teamData)
+    local completeness = self:CalculateTeamCompleteness(teamData)
+    statsText:SetText(string.format("Avg Skill: %d%% | Complete: %d%%", avgSkill, completeness))
+    
+    -- Action buttons
+    local editBtn = CreateFrame("Button", nil, card, "GameMenuButtonTemplate")
+    editBtn:SetPoint("RIGHT", card, "RIGHT", -10, 10)
+    editBtn:SetSize(60, 25)
+    editBtn:SetText("Edit")
+    editBtn:SetScript("OnClick", function()
+        MatchCreator:ShowEditTeamDialog(teamName, teamData)
+    end)
+    
+    local scheduleBtn = CreateFrame("Button", nil, card, "GameMenuButtonTemplate")
+    scheduleBtn:SetPoint("RIGHT", editBtn, "LEFT", -5, 0)
+    scheduleBtn:SetSize(70, 25)
+    scheduleBtn:SetText("Schedule")
+    scheduleBtn:SetScript("OnClick", function()
+        MatchCreator:ShowTeamScheduleDialog(teamName, teamData)
+    end)
+    
+    local optimizeBtn = CreateFrame("Button", nil, card, "GameMenuButtonTemplate")
+    optimizeBtn:SetPoint("RIGHT", scheduleBtn, "LEFT", -5, 0)
+    optimizeBtn:SetSize(70, 25)
+    optimizeBtn:SetText("Optimize")
+    optimizeBtn:SetScript("OnClick", function()
+        MatchCreator:OptimizeTeamForDungeon(teamName, teamData)
+    end)
+    
+    return card
+end
+
+-- Update guild optimizer tab
+function MatchCreator:UpdateGuildOptimizerTab()
+    local content = MatchCreatorGuildFrame.guildTabContents[3]
+    self:ClearGuildTabContent(3)
+    
+    local yOffset = -10
+    
+    -- Optimizer header
+    local optimizerTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    optimizerTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    optimizerTitle:SetText("|cFFFFD700Team Composition Optimizer|r")
+    table.insert(content.elements, optimizerTitle)
+    yOffset = yOffset - 35
+    
+    -- Dungeon selection
+    local dungeonLabel = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    dungeonLabel:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    dungeonLabel:SetText("Select Dungeon:")
+    table.insert(content.elements, dungeonLabel)
+    
+    local dungeonDropdown = CreateFrame("Frame", "MCGuildDungeonDropdown", content.child, "UIDropDownMenuTemplate")
+    dungeonDropdown:SetPoint("LEFT", dungeonLabel, "RIGHT", 10, -5)
+    
+    local dungeonOptions = {}
+    for dungeonName, _ in pairs(self.dungeonData) do
+        table.insert(dungeonOptions, {text = dungeonName, value = dungeonName})
+    end
+    
+    local function DungeonDropdown_OnClick(self)
+        UIDropDownMenu_SetSelectedValue(dungeonDropdown, self.value)
+        MatchCreator.selectedOptimizerDungeon = self.value
+        MatchCreator:RefreshOptimizerResults()
+    end
+    
+    local function DungeonDropdown_Initialize(self, level)
+        for _, option in ipairs(dungeonOptions) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = option.text
+            info.value = option.value
+            info.func = DungeonDropdown_OnClick
+            UIDropDownMenu_AddButton(info, level)
+        end
+    end
+    
+    UIDropDownMenu_Initialize(dungeonDropdown, DungeonDropdown_Initialize)
+    UIDropDownMenu_SetWidth(dungeonDropdown, 200)
+    table.insert(content.elements, dungeonDropdown)
+    yOffset = yOffset - 40
+    
+    -- Player availability filters
+    local availabilityLabel = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    availabilityLabel:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    availabilityLabel:SetText("Player Filters:")
+    table.insert(content.elements, availabilityLabel)
+    yOffset = yOffset - 25
+    
+    -- Online only checkbox
+    local onlineCheck = CreateFrame("CheckButton", "MCOnlineOnly", content.child, "InterfaceOptionsCheckButtonTemplate")
+    onlineCheck:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+    onlineCheck.Text:SetText("Online players only")
+    onlineCheck:SetChecked(true)
+    table.insert(content.elements, onlineCheck)
+    yOffset = yOffset - 25
+    
+    -- Minimum skill level slider
+    local skillLabel = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    skillLabel:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+    skillLabel:SetText("Minimum Skill Level:")
+    table.insert(content.elements, skillLabel)
+    
+    local skillSlider = CreateFrame("Slider", "MCSkillSlider", content.child, "OptionsSliderTemplate")
+    skillSlider:SetPoint("LEFT", skillLabel, "RIGHT", 20, 0)
+    skillSlider:SetMinMaxValues(0, 100)
+    skillSlider:SetValue(60)
+    skillSlider:SetValueStep(5)
+    skillSlider:SetWidth(200)
+    MCSkillSliderLow:SetText("0%")
+    MCSkillSliderHigh:SetText("100%")
+    MCSkillSliderText:SetText("60%")
+    
+    skillSlider:SetScript("OnValueChanged", function(self, value)
+        MCSkillSliderText:SetText(value .. "%")
+    end)
+    table.insert(content.elements, skillSlider)
+    yOffset = yOffset - 40
+    
+    -- Generate compositions button
+    local generateBtn = CreateFrame("Button", nil, content.child, "GameMenuButtonTemplate")
+    generateBtn:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    generateBtn:SetSize(150, 30)
+    generateBtn:SetText("Generate Compositions")
+    generateBtn:SetScript("OnClick", function()
+        MatchCreator:GenerateOptimalCompositions()
+    end)
+    table.insert(content.elements, generateBtn)
+    yOffset = yOffset - 50
+    
+    -- Results area
+    local resultsTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    resultsTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    resultsTitle:SetText("|cFF00FF00Optimal Compositions:|r")
+    table.insert(content.elements, resultsTitle)
+    yOffset = yOffset - 25
+    
+    -- This will be populated when generate button is clicked
+    content.child.resultsArea = {startY = yOffset}
+end
+
+-- Generate optimal compositions
+function MatchCreator:GenerateOptimalCompositions()
+    local dungeonName = self.selectedOptimizerDungeon
+    if not dungeonName then
+        print("|cFFFF0000Error:|r Please select a dungeon first")
+        return
+    end
+    
+    -- Get filtered available players
+    local availablePlayers = {}
+    local onlineOnly = MCOnlineOnly:GetChecked()
+    local minSkillLevel = MCSkillSlider:GetValue()
+    
+    for name, profile in pairs(self.guildPlanner.playerProfiles) do
+        local meetsRequirements = true
+        
+        if onlineOnly and not profile.isOnline then
+            meetsRequirements = false
+        end
+        
+        if profile.performance.skillLevel < minSkillLevel then
+            meetsRequirements = false
+        end
+        
+        if meetsRequirements then
+            availablePlayers[name] = profile
+        end
+    end
+    
+    -- Generate compositions
+    local compositions = self:OptimizeTeamComposition(dungeonName, availablePlayers, {})
+    
+    -- Display results
+    self:DisplayOptimizedCompositions(compositions)
+end
+
+-- Display optimized compositions
+function MatchCreator:DisplayOptimizedCompositions(compositions)
+    local content = MatchCreatorGuildFrame.guildTabContents[3]
+    local yOffset = content.child.resultsArea.startY
+    
+    -- Clear previous results
+    if content.child.results then
+        for _, element in pairs(content.child.results) do
+            if element.Hide then element:Hide() end
+        end
+    end
+    content.child.results = {}
+    
+    if #compositions == 0 then
+        local noResults = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        noResults:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+        noResults:SetText("|cFFFF6666No valid compositions found with current filters|r")
+        table.insert(content.child.results, noResults)
+        return
+    end
+    
+    -- Show top 5 compositions
+    for i = 1, math.min(5, #compositions) do
+        local comp = compositions[i]
+        local compCard = self:CreateCompositionCard(content.child, comp, i, yOffset)
+        table.insert(content.child.results, compCard)
+        yOffset = yOffset - 90
+    end
+    
+    -- Update content height
+    content.child:SetHeight(math.abs(yOffset) + 50)
+end
+
+-- Create composition recommendation card
+function MatchCreator:CreateCompositionCard(parent, composition, rank, yOffset)
+    local card = CreateFrame("Frame", nil, parent)
+    card:SetPoint("TOPLEFT", parent, "TOPLEFT", 20, yOffset)
+    card:SetSize(680, 80)
+    
+    -- Background with rank coloring
+    local bg = card:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    if rank == 1 then
+        bg:SetColorTexture(0.2, 0.4, 0.2, 0.8) -- Green for best
+    elseif rank <= 3 then
+        bg:SetColorTexture(0.3, 0.3, 0.2, 0.8) -- Yellow for good
+    else
+        bg:SetColorTexture(0.2, 0.2, 0.3, 0.8) -- Blue for acceptable
+    end
+    
+    -- Rank and score
+    local rankText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    rankText:SetPoint("LEFT", card, "LEFT", 10, 15)
+    rankText:SetText("#" .. rank)
+    
+    local scoreText = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    scoreText:SetPoint("LEFT", rankText, "RIGHT", 10, 0)
+    local scoreColor = composition.score >= 90 and "|cFF00FF00" or 
+                      composition.score >= 80 and "|cFFFFAA00" or "|cFFFFFFFF"
+    scoreText:SetText(scoreColor .. math.floor(composition.score) .. "% Match|r")
+    
+    -- Team composition
+    local teamText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    teamText:SetPoint("LEFT", card, "LEFT", 10, -5)
+    teamText:SetWidth(500)
+    
+    local teamString = string.format("Tank: %s | Healer: %s | DPS: %s, %s, %s",
+        composition.tank.player.name,
+        composition.healer.player.name,
+        composition.dps[1].player.name,
+        composition.dps[2].player.name,
+        composition.dps[3].player.name)
+    teamText:SetText(teamString)
+    
+    -- Strengths/Warnings
+    local statusText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    statusText:SetPoint("LEFT", card, "LEFT", 10, -25)
+    statusText:SetWidth(500)
+    
+    local statusString = ""
+    if #composition.strengths > 0 then
+        statusString = "|cFF00FF00✓ " .. composition.strengths[1] .. "|r"
+    end
+    if #composition.warnings > 0 then
+        if statusString ~= "" then statusString = statusString .. " | " end
+        statusString = statusString .. "|cFFFF6666⚠ " .. composition.warnings[1].message .. "|r"
+    end
+    statusText:SetText(statusString)
+    
+    -- Create team button
+    local createBtn = CreateFrame("Button", nil, card, "GameMenuButtonTemplate")
+    createBtn:SetPoint("RIGHT", card, "RIGHT", -10, 0)
+    createBtn:SetSize(80, 25)
+    createBtn:SetText("Create Team")
+    createBtn:SetScript("OnClick", function()
+        MatchCreator:CreateTeamFromComposition(composition)
+    end)
+    
+    return card
+end
+
+-- Helper functions for guild planner
+function MatchCreator:ClearGuildTabContent(tabIndex)
+    local content = MatchCreatorGuildFrame.guildTabContents[tabIndex]
+    if content.elements then
+        for _, element in pairs(content.elements) do
+            if element.Hide then
+                element:Hide()
+            end
+        end
+    end
+    content.elements = {}
+end
+
+function MatchCreator:RefreshGuildPlannerFrame()
+    if not MatchCreatorGuildFrame then return end
+    self:RefreshGuildTabContent(MatchCreatorGuildFrame.activeGuildTab or 1)
+end
+
+-- Add guild planner commands
+local originalSlashHandler = SlashCmdList["MATCHCREATOR"]
+SlashCmdList["MATCHCREATOR"] = function(msg)
+    local args = {strsplit(" ", msg)}
+    local cmd = args[1] and string.lower(args[1]) or ""
+    
+    if cmd == "guild" then
+        if not IsInGuild() then
+            print("|cFFFF0000Error:|r You must be in a guild to use the Guild Planner")
+            return
+        end
+        
+        MatchCreator:InitializeGuildPlanner()
+        MatchCreator:ShowGuildPlannerFrame()
+        
+    elseif cmd == "guildhelp" then
+        print("|cFF00FF00Guild Planner Commands:|r")
+        print("/mc guild - Open Guild Composition Planner")
+        print("/mc guildstats - Show guild M+ statistics")
+        print("/mc roster - Quick roster analysis")
+        
+    elseif cmd == "guildstats" then
+        if not IsInGuild() then
+            print("|cFFFF0000Error:|r Not in a guild")
+            return
+        end
+        
+        MatchCreator:InitializeGuildPlanner()
+        local stats = MatchCreator:CalculateGuildStats()
+        print("|cFF00FF00Guild M+ Statistics:|r")
+        print(string.format("Total Members: %d", stats.total))
+        print(string.format("Tanks: %d | Healers: %d | DPS: %d", stats.tanks, stats.healers, stats.dps))
+        print(string.format("Online: %d/%d", stats.online, stats.total))
+        
+    elseif cmd == "roster" then
+        if not IsInGuild() then
+            print("|cFFFF0000Error:|r Not in a guild")
+            return
+        end
+        
+        MatchCreator:InitializeGuildPlanner()
+        print("|cFF00FF00Guild Roster (M+ Ready):|r")
+        
+        for name, profile in pairs(MatchCreator.guildPlanner.playerProfiles) do
+            if profile.isOnline then
+                local roleStr = table.concat(profile.mythicPlusData.preferredRoles, "/")
+                print(string.format("  %s (%s) - %s - Skill: %d%%", 
+                    profile.name, profile.classDisplayName, roleStr, profile.performance.skillLevel))
+            end
+        end
+        
+    else
+        -- Call original handler for other commands
+        originalSlashHandler(msg)
+    end
+end
+
+-- Real-Time Combat Analytics System
+MatchCreator.combatAnalytics = {
+    currentRun = nil,
+    runHistory = {},
+    mechanicTracking = {},
+    performanceMetrics = {},
+    liveTracking = false,
+    startTime = 0,
+    dungeonEvents = {}
+}
+
+-- Initialize Combat Analytics
+function MatchCreator:InitializeCombatAnalytics()
+    self.combatAnalytics = {
+        currentRun = nil,
+        runHistory = {},
+        mechanicTracking = {},
+        performanceMetrics = {},
+        liveTracking = false,
+        startTime = 0,
+        dungeonEvents = {},
+        predictions = {},
+        realityCheck = {}
+    }
+    
+    -- Register combat events
+    self:RegisterCombatEvents()
+    
+    -- Load historical data
+    self:LoadCombatAnalyticsData()
+end
+
+-- Register all combat tracking events
+function MatchCreator:RegisterCombatEvents()
+    local frame = CreateFrame("Frame", "MatchCreatorCombatFrame")
+    
+    -- Core combat events
+    frame:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+    frame:RegisterEvent("ENCOUNTER_START")
+    frame:RegisterEvent("ENCOUNTER_END")
+    frame:RegisterEvent("INSTANCE_ENCOUNTER_ENGAGE_UNIT")
+    
+    -- Dungeon/scenario events
+    frame:RegisterEvent("SCENARIO_COMPLETED")
+    frame:RegisterEvent("SCENARIO_CRITERIA_UPDATE")
+    frame:RegisterEvent("CHALLENGE_MODE_START")
+    frame:RegisterEvent("CHALLENGE_MODE_COMPLETED")
+    frame:RegisterEvent("CHALLENGE_MODE_RESET")
+    
+    -- Group events
+    frame:RegisterEvent("GROUP_ROSTER_UPDATE")
+    frame:RegisterEvent("PARTY_MEMBER_ENABLE")
+    frame:RegisterEvent("PARTY_MEMBER_DISABLE")
+    
+    -- Death/resurrection events
+    frame:RegisterEvent("UNIT_DIED")
+    frame:RegisterEvent("UNIT_SPELLCAST_INTERRUPTED")
+    frame:RegisterEvent("UNIT_SPELLCAST_FAILED")
+    
+    frame:SetScript("OnEvent", function(self, event, ...)
+        MatchCreator:ProcessCombatEvent(event, ...)
+    end)
+end
+
+-- Start run tracking
+function MatchCreator:StartRunTracking()
+    local dungeonName = self:GetCurrentDungeonInstance()
+    if not dungeonName then return end
+    
+    self.combatAnalytics.currentRun = {
+        dungeonName = dungeonName,
+        startTime = time(),
+        groupComposition = self:AnalyzeCurrentGroupDetailed(),
+        predictions = self:GenerateRunPredictions(dungeonName),
+        events = {},
+        mechanics = {
+            interrupts = {attempted = 0, successful = 0, failed = 0},
+            dispels = {attempted = 0, successful = 0, failed = 0},
+            deaths = {total = 0, avoidable = 0, byMechanic = {}},
+            enrageEvents = {total = 0, cleansed = 0, timeout = 0},
+            positioning = {failures = 0, successes = 0},
+            cooldownUsage = {defensive = {}, offensive = {}, healing = {}}
+        },
+        performance = {
+            dps = {},
+            hps = {},
+            dtps = {}, -- Damage taken per second
+            interrupts = {},
+            dispels = {},
+            deaths = {}
+        },
+        bosses = {},
+        trash = {},
+        keyLevel = self:GetCurrentKeyLevel(),
+        affixes = self:GetCurrentAffixes(),
+        timer = {
+            started = time(),
+            checkpoints = {},
+            ended = nil
+        }
+    }
+    
+    self.combatAnalytics.liveTracking = true
+    
+    -- Show live tracking UI
+    self:ShowLiveTrackingFrame()
+    
+    print("|cFF00FF96Combat Analytics:|r Started tracking " .. dungeonName .. " run")
+end
+
+-- Process combat events in real-time
+function MatchCreator:ProcessCombatEvent(event, ...)
+    if not self.combatAnalytics.liveTracking then return end
+    
+    local currentRun = self.combatAnalytics.currentRun
+    if not currentRun then return end
+    
+    local timestamp = time()
+    
+    if event == "COMBAT_LOG_EVENT_UNFILTERED" then
+        self:ProcessCombatLogEvent(...)
+    elseif event == "ENCOUNTER_START" then
+        local encounterID, encounterName = ...
+        self:ProcessEncounterStart(encounterID, encounterName, timestamp)
+    elseif event == "ENCOUNTER_END" then
+        local encounterID, encounterName, difficultyID, groupSize, success = ...
+        self:ProcessEncounterEnd(encounterID, encounterName, success, timestamp)
+    elseif event == "UNIT_DIED" then
+        local unitGUID = ...
+        self:ProcessUnitDeath(unitGUID, timestamp)
+    elseif event == "CHALLENGE_MODE_COMPLETED" then
+        self:ProcessRunCompletion(...)
+    elseif event == "CHALLENGE_MODE_RESET" then
+        self:ProcessRunReset(timestamp)
+    end
+end
+
+-- Process detailed combat log events
+function MatchCreator:ProcessCombatLogEvent(...)
+    local timestamp, subevent, _, sourceGUID, sourceName, sourceFlags, sourceRaidFlags,
+          destGUID, destName, destFlags, destRaidFlags = CombatLogGetCurrentEventInfo()
+    
+    local currentRun = self.combatAnalytics.currentRun
+    if not currentRun then return end
+    
+    -- Track interrupts
+    if subevent == "SPELL_INTERRUPT" then
+        local spellId, spellName, spellSchool, extraSpellID, extraSpellName = select(12, CombatLogGetCurrentEventInfo())
+        self:TrackInterrupt(sourceName, destName, extraSpellName, timestamp, true)
+        
+    -- Track failed casts (missed interrupts)
+    elseif subevent == "SPELL_CAST_SUCCESS" then
+        local spellId, spellName = select(12, CombatLogGetCurrentEventInfo())
+        if self:IsInterruptibleSpell(spellId) and self:IsEnemyUnit(sourceGUID) then
+            self:TrackMissedInterrupt(sourceName, spellName, timestamp)
+        end
+        
+    -- Track dispels
+    elseif subevent == "SPELL_DISPEL" then
+        local spellId, spellName, spellSchool, extraSpellID, extraSpellName = select(12, CombatLogGetCurrentEventInfo())
+        self:TrackDispel(sourceName, destName, extraSpellName, timestamp, true)
+        
+    -- Track deaths
+    elseif subevent == "UNIT_DIED" then
+        if self:IsPartyMember(destGUID) then
+            self:TrackDeath(destName, timestamp)
+        end
+        
+    -- Track damage taken
+    elseif subevent == "SWING_DAMAGE" or subevent == "SPELL_DAMAGE" or subevent == "RANGE_DAMAGE" then
+        if self:IsPartyMember(destGUID) then
+            local amount = select(12, CombatLogGetCurrentEventInfo())
+            self:TrackDamageTaken(destName, amount, timestamp)
+        end
+        
+    -- Track healing
+    elseif subevent == "SPELL_HEAL" then
+        if self:IsPartyMember(sourceGUID) then
+            local amount = select(15, CombatLogGetCurrentEventInfo())
+            self:TrackHealing(sourceName, destName, amount, timestamp)
+        end
+    end
+end
+
+-- Track interrupt performance
+function MatchCreator:TrackInterrupt(sourceName, targetName, spellName, timestamp, successful)
+    local currentRun = self.combatAnalytics.currentRun
+    if not currentRun then return end
+    
+    if not currentRun.performance.interrupts[sourceName] then
+        currentRun.performance.interrupts[sourceName] = {
+            successful = 0,
+            failed = 0,
+            total = 0,
+            spells = {}
+        }
+    end
+    
+    local playerData = currentRun.performance.interrupts[sourceName]
+    playerData.total = playerData.total + 1
+    
+    if successful then
+        playerData.successful = playerData.successful + 1
+        currentRun.mechanics.interrupts.successful = currentRun.mechanics.interrupts.successful + 1
+    else
+        playerData.failed = playerData.failed + 1
+        currentRun.mechanics.interrupts.failed = currentRun.mechanics.interrupts.failed + 1
+    end
+    
+    currentRun.mechanics.interrupts.attempted = currentRun.mechanics.interrupts.attempted + 1
+    
+    -- Track specific spells
+    if not playerData.spells[spellName] then
+        playerData.spells[spellName] = {successful = 0, failed = 0}
+    end
+    
+    if successful then
+        playerData.spells[spellName].successful = playerData.spells[spellName].successful + 1
+    else
+        playerData.spells[spellName].failed = playerData.spells[spellName].failed + 1
+    end
+    
+    -- Update live tracking UI
+    self:UpdateLiveTrackingUI("interrupt", sourceName, successful)
+end
+
+-- Track missed interrupt opportunities
+function MatchCreator:TrackMissedInterrupt(enemyName, spellName, timestamp)
+    local currentRun = self.combatAnalytics.currentRun
+    if not currentRun then return end
+    
+    -- Only track important spells that should have been interrupted
+    local importantSpells = {
+        [spellName] = self:IsHighPriorityInterrupt(spellName)
+    }
+    
+    if importantSpells[spellName] then
+        currentRun.mechanics.interrupts.failed = currentRun.mechanics.interrupts.failed + 1
+        
+        -- Record the missed interrupt event
+        table.insert(currentRun.events, {
+            type = "missed_interrupt",
+            timestamp = timestamp,
+            enemy = enemyName,
+            spell = spellName,
+            severity = self:GetInterruptPriority(spellName)
+        })
+        
+        self:UpdateLiveTrackingUI("missed_interrupt", spellName, false)
+    end
+end
+
+-- Track dispel performance
+function MatchCreator:TrackDispel(sourceName, targetName, dispelledSpell, timestamp, successful)
+    local currentRun = self.combatAnalytics.currentRun
+    if not currentRun then return end
+    
+    if not currentRun.performance.dispels[sourceName] then
+        currentRun.performance.dispels[sourceName] = {
+            successful = 0,
+            total = 0,
+            spells = {}
+        }
+    end
+    
+    local playerData = currentRun.performance.dispels[sourceName]
+    playerData.total = playerData.total + 1
+    
+    if successful then
+        playerData.successful = playerData.successful + 1
+        currentRun.mechanics.dispels.successful = currentRun.mechanics.dispels.successful + 1
+    end
+    
+    currentRun.mechanics.dispels.attempted = currentRun.mechanics.dispels.attempted + 1
+    
+    -- Track dispelled spells
+    playerData.spells[dispelledSpell] = (playerData.spells[dispelledSpell] or 0) + 1
+    
+    self:UpdateLiveTrackingUI("dispel", sourceName, successful)
+end
+
+-- Live tracking UI
+function MatchCreator:ShowLiveTrackingFrame()
+    if MatchCreatorLiveFrame then
+        MatchCreatorLiveFrame:Show()
+        return
+    end
+    
+    local frame = CreateFrame("Frame", "MatchCreatorLiveFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame:SetSize(400, 300)
+    frame:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 50, -50)
+    frame:SetFrameStrata("HIGH")
+    
+    frame.title = frame:CreateFontString(nil, "OVERLAY")
+    frame.title:SetFontObject("GameFontHighlight")
+    frame.title:SetPoint("LEFT", frame.TitleBg, "LEFT", 5, 0)
+    frame.title:SetText("Live Performance Tracking")
+    
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    
+    -- Content area
+    frame.content = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
+    frame.content:SetPoint("TOPLEFT", frame.Inset, "TOPLEFT", 4, -4)
+    frame.content:SetPoint("BOTTOMRIGHT", frame.Inset, "BOTTOMRIGHT", -24, 4)
+    
+    frame.contentChild = CreateFrame("Frame", nil, frame.content)
+    frame.contentChild:SetSize(360, 260)
+    frame.content:SetScrollChild(frame.contentChild)
+    
+    -- Initialize display elements
+    frame.elements = {}
+    
+    -- Run timer
+    frame.timer = frame.contentChild:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    frame.timer:SetPoint("TOP", frame.contentChild, "TOP", 0, -10)
+    frame.timer:SetText("00:00")
+    
+    -- Performance summary
+    frame.perfSummary = frame.contentChild:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    frame.perfSummary:SetPoint("TOP", frame.timer, "BOTTOM", 0, -15)
+    frame.perfSummary:SetText("Initializing tracking...")
+    
+    -- Mechanic tracking
+    frame.mechanics = {}
+    local yOffset = -70
+    
+    -- Interrupts
+    frame.mechanics.interrupts = frame.contentChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.mechanics.interrupts:SetPoint("TOPLEFT", frame.contentChild, "TOPLEFT", 10, yOffset)
+    frame.mechanics.interrupts:SetText("Interrupts: 0/0 (0%)")
+    yOffset = yOffset - 20
+    
+    -- Dispels
+    frame.mechanics.dispels = frame.contentChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.mechanics.dispels:SetPoint("TOPLEFT", frame.contentChild, "TOPLEFT", 10, yOffset)
+    frame.mechanics.dispels:SetText("Dispels: 0/0 (0%)")
+    yOffset = yOffset - 20
+    
+    -- Deaths
+    frame.mechanics.deaths = frame.contentChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.mechanics.deaths:SetPoint("TOPLEFT", frame.contentChild, "TOPLEFT", 10, yOffset)
+    frame.mechanics.deaths:SetText("Deaths: 0")
+    yOffset = yOffset - 30
+    
+    -- Real-time suggestions
+    frame.suggestions = frame.contentChild:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    frame.suggestions:SetPoint("TOPLEFT", frame.contentChild, "TOPLEFT", 10, yOffset)
+    frame.suggestions:SetWidth(340)
+    frame.suggestions:SetJustifyH("LEFT")
+    frame.suggestions:SetText("|cFF00FF00Ready to track performance|r")
+    
+    -- Start update timer
+    frame.updateTimer = C_Timer.NewTicker(1, function()
+        MatchCreator:UpdateLiveTrackingTimer()
+    end)
+    
+    frame:Show()
+end
+
+-- Update live tracking UI
+function MatchCreator:UpdateLiveTrackingUI(eventType, playerName, successful)
+    local frame = MatchCreatorLiveFrame
+    if not frame then return end
+    
+    local currentRun = self.combatAnalytics.currentRun
+    if not currentRun then return end
+    
+    -- Update interrupt display
+    local intStats = currentRun.mechanics.interrupts
+    local intSuccess = intStats.attempted > 0 and math.floor((intStats.successful / intStats.attempted) * 100) or 0
+    frame.mechanics.interrupts:SetText(string.format("Interrupts: %d/%d (%d%%)", 
+        intStats.successful, intStats.attempted, intSuccess))
+    
+    -- Color coding for performance
+    local intColor = intSuccess >= 80 and "|cFF00FF00" or intSuccess >= 60 and "|cFFFFAA00" or "|cFFFF6666"
+    frame.mechanics.interrupts:SetText(intColor .. frame.mechanics.interrupts:GetText() .. "|r")
+    
+    -- Update dispel display
+    local dispStats = currentRun.mechanics.dispels
+    local dispSuccess = dispStats.attempted > 0 and math.floor((dispStats.successful / dispStats.attempted) * 100) or 0
+    frame.mechanics.dispels:SetText(string.format("Dispels: %d/%d (%d%%)", 
+        dispStats.successful, dispStats.attempted, dispSuccess))
+    
+    local dispColor = dispSuccess >= 90 and "|cFF00FF00" or dispSuccess >= 70 and "|cFFFFAA00" or "|cFFFF6666"
+    frame.mechanics.dispels:SetText(dispColor .. frame.mechanics.dispels:GetText() .. "|r")
+    
+    -- Update deaths
+    frame.mechanics.deaths:SetText("Deaths: " .. currentRun.mechanics.deaths.total)
+    local deathColor = currentRun.mechanics.deaths.total == 0 and "|cFF00FF00" or 
+                      currentRun.mechanics.deaths.total <= 2 and "|cFFFFAA00" or "|cFFFF6666"
+    frame.mechanics.deaths:SetText(deathColor .. frame.mechanics.deaths:GetText() .. "|r")
+    
+    -- Generate real-time suggestions
+    self:UpdateRealTimeSuggestions()
+end
+
+-- Generate real-time improvement suggestions
+function MatchCreator:UpdateRealTimeSuggestions()
+    local frame = MatchCreatorLiveFrame
+    if not frame then return end
+    
+    local currentRun = self.combatAnalytics.currentRun
+    if not currentRun then return end
+    
+    local suggestions = {}
+    
+    -- Interrupt analysis
+    local intStats = currentRun.mechanics.interrupts
+    if intStats.attempted > 5 then
+        local successRate = (intStats.successful / intStats.attempted) * 100
+        if successRate < 60 then
+            table.insert(suggestions, "|cFFFF6666⚠ Low interrupt success rate (" .. math.floor(successRate) .. "%)|r")
+        elseif successRate >= 90 then
+            table.insert(suggestions, "|cFF00FF00✓ Excellent interrupt coverage!|r")
+        end
+    end
+    
+    -- Death analysis
+    if currentRun.mechanics.deaths.total > 0 then
+        local avoidablePercent = currentRun.mechanics.deaths.avoidable / currentRun.mechanics.deaths.total * 100
+        if avoidablePercent > 50 then
+            table.insert(suggestions, "|cFFFF6666⚠ " .. currentRun.mechanics.deaths.avoidable .. " avoidable deaths detected|r")
+        end
+    end
+    
+    -- Performance vs predictions
+    local predictions = currentRun.predictions
+    if predictions then
+        local currentTime = time() - currentRun.startTime
+        if currentTime > 300 then -- After 5 minutes
+            local predictedInterrupts = predictions.expectedInterrupts or 0
+            if intStats.attempted < predictedInterrupts * 0.7 then
+                table.insert(suggestions, "|cFFFFAA00⚠ Below expected interrupt frequency|r")
+            end
+        end
+    end
+    
+    -- Compile suggestions
+    local suggestionText = "Real-time Analysis:\n"
+    if #suggestions > 0 then
+        suggestionText = suggestionText .. table.concat(suggestions, "\n")
+    else
+        suggestionText = suggestionText .. "|cFF00FF00Performance tracking nominal|r"
+    end
+    
+    frame.suggestions:SetText(suggestionText)
+end
+
+-- Update run timer
+function MatchCreator:UpdateLiveTrackingTimer()
+    local frame = MatchCreatorLiveFrame
+    if not frame then return end
+    
+    local currentRun = self.combatAnalytics.currentRun
+    if not currentRun then return end
+    
+    local elapsed = time() - currentRun.startTime
+    local minutes = math.floor(elapsed / 60)
+    local seconds = elapsed % 60
+    
+    frame.timer:SetText(string.format("%02d:%02d", minutes, seconds))
+    
+    -- Color based on expected completion time
+    local dungeonData = self.dungeonData[currentRun.dungeonName]
+    if dungeonData and dungeonData.expectedTime then
+        local timeRatio = elapsed / dungeonData.expectedTime
+        if timeRatio > 1.2 then
+            frame.timer:SetTextColor(1, 0.4, 0.4) -- Red for overtime
+        elseif timeRatio > 0.9 then
+            frame.timer:SetTextColor(1, 1, 0.4) -- Yellow for close
+        else
+            frame.timer:SetTextColor(0.4, 1, 0.4) -- Green for good time
+        end
+    end
+end
+
+-- End run tracking and generate analysis
+function MatchCreator:EndRunTracking(success, completionTime)
+    if not self.combatAnalytics.liveTracking then return end
+    
+    local currentRun = self.combatAnalytics.currentRun
+    if not currentRun then return end
+    
+    -- Finalize run data
+    currentRun.timer.ended = time()
+    currentRun.success = success
+    currentRun.completionTime = completionTime or (time() - currentRun.startTime)
+    currentRun.endTime = time()
+    
+    -- Generate comprehensive analysis
+    local analysis = self:GeneratePostRunAnalysis(currentRun)
+    currentRun.analysis = analysis
+    
+    -- Save to history
+    table.insert(self.combatAnalytics.runHistory, currentRun)
+    
+    -- Show post-run analysis
+    self:ShowPostRunAnalysis(currentRun, analysis)
+    
+    -- Update player performance ratings
+    self:UpdatePlayerRatings(currentRun)
+    
+    -- Clean up
+    self.combatAnalytics.currentRun = nil
+    self.combatAnalytics.liveTracking = false
+    
+    -- Hide live tracking
+    if MatchCreatorLiveFrame then
+        MatchCreatorLiveFrame:Hide()
+        if MatchCreatorLiveFrame.updateTimer then
+            MatchCreatorLiveFrame.updateTimer:Cancel()
+        end
+    end
+    
+    print("|cFF00FF96Combat Analytics:|r Run completed. Analysis generated!")
+end
+
+-- Generate comprehensive post-run analysis
+function MatchCreator:GeneratePostRunAnalysis(runData)
+    local analysis = {
+        overall = {
+            success = runData.success,
+            duration = runData.completionTime,
+            rating = "Unknown"
+        },
+        predictions = {
+            accuracy = 0,
+            correctPredictions = {},
+            incorrectPredictions = {}
+        },
+        performance = {
+            interrupts = {},
+            dispels = {},
+            deaths = {},
+            overall = {}
+        },
+        improvements = {},
+        strengths = {},
+        recommendations = {}
+    }
+    
+    -- Calculate prediction accuracy
+    if runData.predictions then
+        analysis.predictions = self:AnalyzePredictionAccuracy(runData)
+    end
+    
+    -- Analyze interrupt performance
+    analysis.performance.interrupts = self:AnalyzeInterruptPerformance(runData)
+    
+    -- Analyze dispel performance
+    analysis.performance.dispels = self:AnalyzeDispelPerformance(runData)
+    
+    -- Analyze death events
+    analysis.performance.deaths = self:AnalyzeDeathEvents(runData)
+    
+    -- Generate overall rating
+    analysis.overall.rating = self:CalculateOverallPerformance(runData, analysis)
+    
+    -- Generate improvement suggestions
+    analysis.improvements = self:GenerateImprovementSuggestions(runData, analysis)
+    
+    -- Identify strengths
+    analysis.strengths = self:IdentifyGroupStrengths(runData, analysis)
+    
+    -- Generate recommendations for future runs
+    analysis.recommendations = self:GenerateFutureRecommendations(runData, analysis)
+    
+    return analysis
+end-- Helper functions for smart suggestions
 function MatchCreator:GetTopSpecsForRole(role, dungeonData, count)
     if not dungeonData.preferredSpecs[role] then return {} end
     
