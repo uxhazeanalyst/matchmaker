@@ -1,4 +1,289 @@
--- Match Creator Addon - Clean Working Version
+-- Format mechanic names for display
+function MatchCreator:FormatMechanicName(mechanic)
+    local names = {
+        parry = "Parry",
+        dodge = "Dodge",
+        block = "Block",
+        magicDefense = "Magic Defense",
+        physicalDefense = "Physical Defense",
+        aoeReduction = "AoE Reduction",
+        dispel = "Dispel",
+        interrupt = "Interrupt",
+        mobility = "Mobility",
+        enrageRemoval = "Enrage Removal",
+        stunBreak = "Stun Break",
+        immunity = "Immunity Phases",
+        fearResist = "Fear Resistance",
+        hookAvoidance = "Hook Avoidance",
+        diseaseResist = "Disease Resistance",
+        positioning = "Positioning",
+        crowdControl = "Crowd Control",
+        rangedAdvantage = "Ranged Advantage",
+        knockbackResist = "Knockback Resist",
+        reflectAvoidance = "Reflect Avoidance",
+        portalNavigation = "Portal Navigation",
+        spellSteal = "Spell Steal",
+        immunityPhases = "Immunity Phases"
+    }
+    return names[mechanic] or mechanic
+end
+
+-- Enhanced recommendation frame with tabbed interface
+function MatchCreator:ShowRecommendationFrame()
+    -- Close existing frame
+    if MatchCreatorFrame then
+        MatchCreatorFrame:Hide()
+        MatchCreatorFrame = nil
+    end
+    
+    -- Create main frame
+    local frame = CreateFrame("Frame", "MatchCreatorFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame:SetSize(600, 500)
+    frame:SetPoint("CENTER", 0, 0)
+    
+    -- Title
+    frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    frame.title:SetPoint("LEFT", frame.TitleBg, "LEFT", 5, 0)
+    frame.title:SetText("Match Creator - Dungeon Analysis")
+    
+    -- Make movable
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    
+    -- Create tab system
+    frame.tabs = {}
+    frame.tabContents = {}
+    frame.activeTab = 1
+    
+    local tabNames = {"Overview", "Tanks", "Healers", "DPS", "Mechanics"}
+    local tabWidth = 110
+    
+    for i, tabName in ipairs(tabNames) do
+        local tab = CreateFrame("Button", "MatchCreatorTab"..i, frame, "TabButtonTemplate")
+        tab:SetSize(tabWidth, 32)
+        tab:SetPoint("TOPLEFT", frame, "BOTTOMLEFT", (i-1) * tabWidth, 2)
+        tab:SetText(tabName)
+        tab.tabIndex = i
+        
+        tab:SetScript("OnClick", function(self)
+            MatchCreator:SelectTab(self.tabIndex)
+        end)
+        
+        frame.tabs[i] = tab
+        
+        -- Create content frame for each tab
+        local content = CreateFrame("ScrollFrame", "MatchCreatorContent"..i, frame, "UIPanelScrollFrameTemplate")
+        content:SetPoint("TOPLEFT", frame.Inset, "TOPLEFT", 4, -4)
+        content:SetPoint("BOTTOMRIGHT", frame.Inset, "BOTTOMRIGHT", -24, 4)
+        
+        local contentChild = CreateFrame("Frame", nil, content)
+        contentChild:SetSize(550, 450)
+        content:SetScrollChild(contentChild)
+        content:Hide()
+        
+        frame.tabContents[i] = {frame = content, child = contentChild, elements = {}}
+    end
+    
+    -- Show first tab by default
+    frame.tabContents[1].frame:Show()
+    PanelTemplates_SelectTab(frame.tabs[1])
+    
+    -- Load content
+    self:RefreshTabContent(1)
+    
+    frame:Show()
+end
+
+-- Tab selection handler
+function MatchCreator:SelectTab(tabIndex)
+    local frame = MatchCreatorFrame
+    if not frame then return end
+    
+    -- Hide all tab contents
+    for i, content in ipairs(frame.tabContents) do
+        content.frame:Hide()
+        PanelTemplates_DeselectTab(frame.tabs[i])
+    end
+    
+    -- Show selected tab
+    frame.tabContents[tabIndex].frame:Show()
+    PanelTemplates_SelectTab(frame.tabs[tabIndex])
+    frame.activeTab = tabIndex
+    
+    -- Refresh content for the selected tab
+    self:RefreshTabContent(tabIndex)
+end
+
+-- Refresh tab content
+function MatchCreator:RefreshTabContent(tabIndex)
+    local currentDungeon = self:GetCurrentDungeon()
+    local recommendations = self:GetDungeonRecommendations(currentDungeon)
+    
+    if not recommendations then
+        self:ShowTabError(tabIndex, "No data available for current dungeon")
+        return
+    end
+    
+    if tabIndex == 1 then
+        self:UpdateOverviewTab(recommendations, currentDungeon)
+    elseif tabIndex == 2 then
+        self:UpdateRoleTab("tank", recommendations, currentDungeon)
+    elseif tabIndex == 3 then
+        self:UpdateRoleTab("healer", recommendations, currentDungeon)
+    elseif tabIndex == 4 then
+        self:UpdateRoleTab("dps", recommendations, currentDungeon)
+    elseif tabIndex == 5 then
+        self:UpdateMechanicsTab(recommendations, currentDungeon)
+    end
+end
+
+-- Update overview tab
+function MatchCreator:UpdateOverviewTab(recommendations, dungeonName)
+    local content = MatchCreatorFrame.tabContents[1]
+    self:ClearTabContent(1)
+    
+    local yOffset = -10
+    
+    -- Dungeon title
+    local dungeonTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    dungeonTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    dungeonTitle:SetText("|cFFFFD700" .. dungeonName .. "|r")
+    table.insert(content.elements, dungeonTitle)
+    yOffset = yOffset - 35
+    
+    -- Quick summary
+    local summaryTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    summaryTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    summaryTitle:SetText("|cFF00FF00Quick Recommendations:|r")
+    table.insert(content.elements, summaryTitle)
+    yOffset = yOffset - 25
+    
+    -- Top pick for each role
+    local roles = {
+        {key = "tank", name = "Tank", color = "|cFF4A9EFF"},
+        {key = "healer", name = "Healer", color = "|cFF40FF40"},
+        {key = "dps", name = "DPS", color = "|cFFFF6347"}
+    }
+    
+    for _, role in ipairs(roles) do
+        if recommendations.preferredSpecs[role.key] then
+            local topSpec = self:GetTopSpec(recommendations.preferredSpecs[role.key])
+            if topSpec then
+                local roleText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                roleText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+                local formattedSpec = string.gsub(topSpec.spec, "_", " - ")
+                roleText:SetText(string.format("%s%s:|r %s (%d%%)", role.color, role.name, formattedSpec, topSpec.rating))
+                table.insert(content.elements, roleText)
+                yOffset = yOffset - 18
+            end
+        end
+    end
+    
+    yOffset = yOffset - 15
+    
+    -- Key mechanics with visual bars
+    local mechanicsTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    mechanicsTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    mechanicsTitle:SetText("|cFFFFAA00Key Mechanics:|r")
+    table.insert(content.elements, mechanicsTitle)
+    yOffset = yOffset - 25
+    
+    self:CreateMechanicBars(content, recommendations.summary, yOffset)
+end
+
+-- Create visual mechanic importance bars
+function MatchCreator:CreateMechanicBars(content, mechanics, yOffset)
+    -- Sort mechanics by importance
+    local sortedMechanics = {}
+    for mechanic, value in pairs(mechanics) do
+        table.insert(sortedMechanics, {name = mechanic, value = value})
+    end
+    table.sort(sortedMechanics, function(a, b) return a.value > b.value end)
+    
+    -- Create visual bars for top 6 mechanics
+    local maxBarWidth = 300
+    for i, mech in ipairs(sortedMechanics) do
+        if i > 6 then break end
+        
+        -- Mechanic name
+        local mechName = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        mechName:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+        mechName:SetText(self:FormatMechanicName(mech.name))
+        table.insert(content.elements, mechName)
+        
+        -- Create bar background
+        local barBG = CreateFrame("Frame", nil, content.child)
+        barBG:SetPoint("LEFT", mechName, "RIGHT", 10, 0)
+        barBG:SetSize(maxBarWidth, 12)
+        local bgTexture = barBG:CreateTexture(nil, "BACKGROUND")
+        bgTexture:SetAllPoints()
+        bgTexture:SetColorTexture(0.2, 0.2, 0.2, 0.8)
+        table.insert(content.elements, barBG)
+        
+        -- Create importance bar
+        local barWidth = (mech.value / 100) * maxBarWidth
+        local bar = CreateFrame("Frame", nil, content.child)
+        bar:SetPoint("LEFT", barBG, "LEFT", 0, 0)
+        bar:SetSize(barWidth, 12)
+        
+        local barTexture = bar:CreateTexture(nil, "ARTWORK")
+        barTexture:SetAllPoints()
+        
+        -- Color code by importance
+        if mech.value >= 90 then
+            barTexture:SetColorTexture(1, 0.2, 0.2, 0.8) -- Red for critical
+        elseif mech.value >= 80 then
+            barTexture:SetColorTexture(1, 0.6, 0, 0.8) -- Orange for high
+        elseif mech.value >= 70 then
+            barTexture:SetColorTexture(1, 1, 0, 0.8) -- Yellow for moderate
+        else
+            barTexture:SetColorTexture(0.6, 0.8, 1, 0.8) -- Blue for low
+        end
+        
+        table.insert(content.elements, bar)
+        
+        -- Value text
+        local valueText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        valueText:SetPoint("RIGHT", barBG, "RIGHT", 5, 0)
+        valueText:SetText(mech.value .. "%")
+        table.insert(content.elements, valueText)
+        
+        yOffset = yOffset - 20
+    end
+end
+
+-- Update role-specific tab
+function MatchCreator:UpdateRoleTab(role, recommendations, dungeonName)
+    local tabIndex = role == "tank" and 2 or role == "healer" and 3 or 4
+    local content = MatchCreatorFrame.tabContents[tabIndex]
+    self:ClearTabContent(tabIndex)
+    
+    local yOffset = -10
+    local roleColors = {tank = "|cFF4A9EFF", healer = "|cFF40FF40", dps = "|cFFFF6347"}
+    local roleNames = {tank = "Tank", healer = "Healer", dps = "DPS"}
+    
+    -- Role title
+    local roleTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    roleTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    roleTitle:SetText(roleColors[role] .. roleNames[role] .. " Recommendations|r")
+    table.insert(content.elements, roleTitle)
+    yOffset = yOffset - 30
+    
+    -- Dungeon context
+    local contextText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    contextText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    contextText:SetText("For: " .. dungeonName)
+    table.insert(content.elements, contextText)
+    yOffset = yOffset - 25
+    
+    if not recommendations.preferredSpecs[role] then
+        local noData = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        noData:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        noData:SetText("No data available for this role")
+        table.insert(content-- Match Creator Addon - Clean Working Version
 -- TOC: ## Interface: 100200
 -- TOC: ## Title: Match Creator
 -- TOC: ## Notes: Advanced dungeon group composition analyzer
@@ -9,71 +294,400 @@ MatchCreator = {}
 
 -- Initialize core data structures
 function MatchCreator:Initialize()
-    -- Core dungeon data (simplified for testing)
+    -- Extended dungeon database - All Season 4 dungeons
     self.dungeonData = {
         ["Mists of Tirna Scithe"] = {
             mechanics = {
                 parry = 75,
                 dodge = 60,
+                block = 45,
                 magicDefense = 85,
                 physicalDefense = 40,
                 aoeReduction = 90,
                 dispel = 80,
                 interrupt = 70,
                 mobility = 75,
-                enrageRemoval = 0
+                enrageRemoval = 0,
+                stunBreak = 60,
+                immunity = 50,
+                positioning = 80,
+                crowdControl = 65,
+                rangedAdvantage = 70
             },
             preferredSpecs = {
                 tank = {
                     ["Demon Hunter_Vengeance"] = 95,
                     ["Death Knight_Blood"] = 85,
-                    ["Paladin_Protection"] = 75
+                    ["Monk_Brewmaster"] = 80,
+                    ["Paladin_Protection"] = 75,
+                    ["Warrior_Protection"] = 65,
+                    ["Druid_Guardian"] = 70
                 },
                 healer = {
                     ["Priest_Discipline"] = 90,
                     ["Shaman_Restoration"] = 85,
-                    ["Druid_Restoration"] = 80
+                    ["Druid_Restoration"] = 80,
+                    ["Monk_Mistweaver"] = 75,
+                    ["Paladin_Holy"] = 70,
+                    ["Priest_Holy"] = 75,
+                    ["Evoker_Preservation"] = 85
                 },
                 dps = {
-                    ["Hunter_Beast Mastery"] = 85,
-                    ["Mage_Frost"] = 80,
-                    ["Demon Hunter_Havoc"] = 90
+                    ["Mage_Any"] = 85,
+                    ["Hunter_Any"] = 80,
+                    ["Demon Hunter_Havoc"] = 90,
+                    ["Rogue_Any"] = 75,
+                    ["Warlock_Any"] = 70,
+                    ["Priest_Shadow"] = 85,
+                    ["Shaman_Elemental"] = 80,
+                    ["Druid_Balance"] = 80
                 }
             }
         },
+        
         ["The Necrotic Wake"] = {
             mechanics = {
                 parry = 60,
                 dodge = 55,
+                block = 70,
                 magicDefense = 60,
                 physicalDefense = 80,
                 aoeReduction = 75,
                 dispel = 90,
                 interrupt = 85,
                 mobility = 50,
-                enrageRemoval = 0
+                enrageRemoval = 0,
+                fearResist = 70,
+                hookAvoidance = 85,
+                diseaseResist = 80,
+                positioning = 60,
+                crowdControl = 70
             },
             preferredSpecs = {
                 tank = {
                     ["Warrior_Protection"] = 90,
                     ["Death Knight_Blood"] = 95,
-                    ["Paladin_Protection"] = 85
+                    ["Paladin_Protection"] = 85,
+                    ["Demon Hunter_Vengeance"] = 70,
+                    ["Monk_Brewmaster"] = 75,
+                    ["Druid_Guardian"] = 70
                 },
                 healer = {
                     ["Priest_Holy"] = 90,
                     ["Shaman_Restoration"] = 85,
-                    ["Paladin_Holy"] = 80
+                    ["Paladin_Holy"] = 80,
+                    ["Druid_Restoration"] = 75,
+                    ["Monk_Mistweaver"] = 70,
+                    ["Priest_Discipline"] = 80,
+                    ["Evoker_Preservation"] = 75
                 },
                 dps = {
-                    ["Hunter_Beast Mastery"] = 85,
-                    ["Mage_Fire"] = 80,
-                    ["Death Knight_Unholy"] = 85
+                    ["Hunter_Any"] = 85,
+                    ["Mage_Any"] = 80,
+                    ["Priest_Shadow"] = 85,
+                    ["Shaman_Any"] = 80,
+                    ["Warlock_Any"] = 75,
+                    ["Death Knight_Any"] = 85,
+                    ["Paladin_Retribution"] = 80
+                }
+            }
+        },
+
+        ["Siege of Boralus"] = {
+            mechanics = {
+                parry = 70,
+                dodge = 65,
+                block = 75,
+                magicDefense = 70,
+                physicalDefense = 85,
+                aoeReduction = 80,
+                dispel = 75,
+                interrupt = 95,
+                mobility = 85,
+                enrageRemoval = 0,
+                knockbackResist = 80,
+                positioning = 90,
+                rangedAdvantage = 85,
+                crowdControl = 60
+            },
+            preferredSpecs = {
+                tank = {
+                    ["Warrior_Protection"] = 90,
+                    ["Paladin_Protection"] = 85,
+                    ["Death Knight_Blood"] = 80,
+                    ["Demon Hunter_Vengeance"] = 85,
+                    ["Monk_Brewmaster"] = 75,
+                    ["Druid_Guardian"] = 70
+                },
+                healer = {
+                    ["Shaman_Restoration"] = 90,
+                    ["Priest_Discipline"] = 85,
+                    ["Evoker_Preservation"] = 85,
+                    ["Monk_Mistweaver"] = 80,
+                    ["Druid_Restoration"] = 75,
+                    ["Paladin_Holy"] = 70,
+                    ["Priest_Holy"] = 75
+                },
+                dps = {
+                    ["Hunter_Any"] = 90,
+                    ["Mage_Any"] = 85,
+                    ["Demon Hunter_Havoc"] = 85,
+                    ["Warrior_Any"] = 80,
+                    ["Shaman_Any"] = 85,
+                    ["Death Knight_Any"] = 80,
+                    ["Monk_Windwalker"] = 85
+                }
+            }
+        },
+
+        ["Halls of Atonement"] = {
+            mechanics = {
+                parry = 80,
+                dodge = 70,
+                block = 50,
+                magicDefense = 75,
+                physicalDefense = 85,
+                aoeReduction = 80,
+                dispel = 60,
+                interrupt = 90,
+                mobility = 65,
+                enrageRemoval = 0,
+                reflectAvoidance = 85,
+                positioning = 75,
+                crowdControl = 70,
+                rangedAdvantage = 60
+            },
+            preferredSpecs = {
+                tank = {
+                    ["Warrior_Protection"] = 85,
+                    ["Death Knight_Blood"] = 80,
+                    ["Paladin_Protection"] = 90,
+                    ["Demon Hunter_Vengeance"] = 75,
+                    ["Monk_Brewmaster"] = 70,
+                    ["Druid_Guardian"] = 65
+                },
+                healer = {
+                    ["Priest_Holy"] = 85,
+                    ["Shaman_Restoration"] = 80,
+                    ["Evoker_Preservation"] = 80,
+                    ["Paladin_Holy"] = 75,
+                    ["Monk_Mistweaver"] = 70,
+                    ["Druid_Restoration"] = 75,
+                    ["Priest_Discipline"] = 80
+                },
+                dps = {
+                    ["Mage_Any"] = 85,
+                    ["Hunter_Any"] = 80,
+                    ["Warrior_Any"] = 85,
+                    ["Shaman_Any"] = 80,
+                    ["Death Knight_Any"] = 80,
+                    ["Demon Hunter_Havoc"] = 75,
+                    ["Paladin_Retribution"] = 80
+                }
+            }
+        },
+
+        ["Theater of Pain"] = {
+            mechanics = {
+                parry = 60,
+                dodge = 70,
+                block = 65,
+                magicDefense = 80,
+                physicalDefense = 75,
+                aoeReduction = 85,
+                dispel = 70,
+                interrupt = 80,
+                mobility = 90,
+                enrageRemoval = 85,
+                fearResist = 75,
+                positioning = 95,
+                crowdControl = 80,
+                rangedAdvantage = 75
+            },
+            preferredSpecs = {
+                tank = {
+                    ["Demon Hunter_Vengeance"] = 90,
+                    ["Monk_Brewmaster"] = 85,
+                    ["Warrior_Protection"] = 80,
+                    ["Death Knight_Blood"] = 75,
+                    ["Paladin_Protection"] = 80,
+                    ["Druid_Guardian"] = 85
+                },
+                healer = {
+                    ["Monk_Mistweaver"] = 90,
+                    ["Evoker_Preservation"] = 85,
+                    ["Shaman_Restoration"] = 80,
+                    ["Priest_Discipline"] = 75,
+                    ["Druid_Restoration"] = 85,
+                    ["Paladin_Holy"] = 70,
+                    ["Priest_Holy"] = 75
+                },
+                dps = {
+                    ["Hunter_Any"] = 95,
+                    ["Druid_Any"] = 95,
+                    ["Rogue_Any"] = 90,
+                    ["Demon Hunter_Havoc"] = 90,
+                    ["Monk_Windwalker"] = 90,
+                    ["Mage_Any"] = 80,
+                    ["Warrior_Any"] = 85,
+                    ["Shaman_Any"] = 85
+                }
+            }
+        },
+
+        ["Plaguefall"] = {
+            mechanics = {
+                parry = 50,
+                dodge = 60,
+                block = 55,
+                magicDefense = 85,
+                physicalDefense = 60,
+                aoeReduction = 90,
+                dispel = 95,
+                interrupt = 85,
+                mobility = 75,
+                enrageRemoval = 0,
+                diseaseResist = 95,
+                immunityPhases = 70,
+                positioning = 80,
+                crowdControl = 75
+            },
+            preferredSpecs = {
+                tank = {
+                    ["Demon Hunter_Vengeance"] = 90,
+                    ["Death Knight_Blood"] = 85,
+                    ["Paladin_Protection"] = 80,
+                    ["Monk_Brewmaster"] = 75,
+                    ["Warrior_Protection"] = 70,
+                    ["Druid_Guardian"] = 75
+                },
+                healer = {
+                    ["Priest_Holy"] = 95,
+                    ["Paladin_Holy"] = 90,
+                    ["Shaman_Restoration"] = 85,
+                    ["Evoker_Preservation"] = 80,
+                    ["Monk_Mistweaver"] = 70,
+                    ["Druid_Restoration"] = 75,
+                    ["Priest_Discipline"] = 85
+                },
+                dps = {
+                    ["Priest_Shadow"] = 90,
+                    ["Paladin_Retribution"] = 85,
+                    ["Mage_Any"] = 80,
+                    ["Hunter_Any"] = 80,
+                    ["Shaman_Any"] = 85,
+                    ["Death Knight_Any"] = 85,
+                    ["Demon Hunter_Havoc"] = 80
+                }
+            }
+        },
+
+        ["Spires of Ascension"] = {
+            mechanics = {
+                parry = 65,
+                dodge = 70,
+                block = 60,
+                magicDefense = 90,
+                physicalDefense = 50,
+                aoeReduction = 85,
+                dispel = 80,
+                interrupt = 95,
+                mobility = 80,
+                enrageRemoval = 0,
+                spellSteal = 85,
+                positioning = 85,
+                crowdControl = 75,
+                rangedAdvantage = 80
+            },
+            preferredSpecs = {
+                tank = {
+                    ["Demon Hunter_Vengeance"] = 95,
+                    ["Paladin_Protection"] = 85,
+                    ["Warrior_Protection"] = 80,
+                    ["Death Knight_Blood"] = 75,
+                    ["Monk_Brewmaster"] = 80,
+                    ["Druid_Guardian"] = 70
+                },
+                healer = {
+                    ["Evoker_Preservation"] = 90,
+                    ["Priest_Discipline"] = 85,
+                    ["Shaman_Restoration"] = 80,
+                    ["Paladin_Holy"] = 85,
+                    ["Priest_Holy"] = 80,
+                    ["Monk_Mistweaver"] = 75,
+                    ["Druid_Restoration"] = 75
+                },
+                dps = {
+                    ["Mage_Any"] = 95,
+                    ["Warlock_Any"] = 85,
+                    ["Priest_Shadow"] = 85,
+                    ["Shaman_Any"] = 85,
+                    ["Hunter_Any"] = 80,
+                    ["Demon Hunter_Havoc"] = 85,
+                    ["Warrior_Any"] = 80
+                }
+            }
+        },
+
+        ["De Other Side"] = {
+            mechanics = {
+                parry = 55,
+                dodge = 60,
+                block = 50,
+                magicDefense = 75,
+                physicalDefense = 70,
+                aoeReduction = 80,
+                dispel = 85,
+                interrupt = 80,
+                mobility = 85,
+                enrageRemoval = 70,
+                portalNavigation = 90,
+                positioning = 85,
+                crowdControl = 80,
+                rangedAdvantage = 75
+            },
+            preferredSpecs = {
+                tank = {
+                    ["Monk_Brewmaster"] = 90,
+                    ["Demon Hunter_Vengeance"] = 85,
+                    ["Warrior_Protection"] = 75,
+                    ["Death Knight_Blood"] = 70,
+                    ["Paladin_Protection"] = 80,
+                    ["Druid_Guardian"] = 85
+                },
+                healer = {
+                    ["Monk_Mistweaver"] = 95,
+                    ["Evoker_Preservation"] = 90,
+                    ["Shaman_Restoration"] = 80,
+                    ["Druid_Restoration"] = 85,
+                    ["Priest_Discipline"] = 75,
+                    ["Priest_Holy"] = 75,
+                    ["Paladin_Holy"] = 70
+                },
+                dps = {
+                    ["Hunter_Any"] = 90,
+                    ["Druid_Any"] = 90,
+                    ["Monk_Windwalker"] = 95,
+                    ["Demon Hunter_Havoc"] = 85,
+                    ["Rogue_Any"] = 80,
+                    ["Mage_Any"] = 75,
+                    ["Warrior_Any"] = 75,
+                    ["Death Knight_Any"] = 70
                 }
             }
         }
     }
     
-    print("|cFF00FF00Match Creator:|r Initialized successfully!")
+    print("|cFF00FF00Match Creator:|r Initialized with " .. self:CountDungeons() .. " dungeons!")
+end
+
+-- Count dungeons for confirmation
+function MatchCreator:CountDungeons()
+    local count = 0
+    for _ in pairs(self.dungeonData) do
+        count = count + 1
+    end
+    return count
 end
 
 -- Get current dungeon (placeholder)
