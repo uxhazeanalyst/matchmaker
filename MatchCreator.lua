@@ -1,4 +1,572 @@
--- Enhanced slash commands with UI controls
+-- Helper functions for smart suggestions
+function MatchCreator:GetTopSpecsForRole(role, dungeonData, count)
+    if not dungeonData.preferredSpecs[role] then return {} end
+    
+    local specs = {}
+    for spec, rating in pairs(dungeonData.preferredSpecs[role]) do
+        table.insert(specs, {spec = spec, rating = rating})
+    end
+    
+    table.sort(specs, function(a, b) return a.rating > b.rating end)
+    
+    local topSpecs = {}
+    for i = 1, math.min(count, #specs) do
+        table.insert(topSpecs, specs[i].spec)
+    end
+    
+    return topSpecs
+end
+
+function MatchCreator:EstimateSpecRating(specKey, role, dungeonName)
+    -- Base rating estimation for specs not in database
+    local baseRatings = {
+        tank = 70,
+        healer = 70,
+        dps = 65
+    }
+    
+    return baseRatings[string.lower(role)] or 60
+end
+
+function MatchCreator:CalculateAffixCompatibility(specKey, affixes)
+    local adjustment = 0
+    local class, spec = string.match(specKey, "(.+)_(.+)")
+    
+    for _, affix in ipairs(affixes) do
+        if affix == "Raging" then
+            if class == "Hunter" or class == "Druid" then
+                adjustment = adjustment + 10 -- Bonus for soothe capability
+            end
+        elseif affix == "Bursting" then
+            if class == "Priest" and spec ~= "Discipline" then
+                adjustment = adjustment + 5 -- Raw healing bonus
+            elseif class == "Priest" and spec == "Discipline" then
+                adjustment = adjustment - 5 -- Absorbs don't help
+            end
+        elseif affix == "Spiteful" then
+            if class == "Hunter" or class == "Mage" or class == "Warlock" then
+                adjustment = adjustment + 5 -- Ranged advantage
+            end
+        end
+    end
+    
+    return adjustment
+end
+
+function MatchCreator:GetExpectedItemLevel(dungeonName)
+    -- Expected item levels for different key levels
+    local baseLevels = {
+        ["Mists of Tirna Scithe"] = 470,
+        ["The Necrotic Wake"] = 470,
+        ["Halls of Atonement"] = 470,
+        ["Siege of Boralus"] = 475,
+        ["Theater of Pain"] = 475,
+        ["Plaguefall"] = 475,
+        ["Spires of Ascension"] = 475,
+        ["De Other Side"] = 475,
+        ["Dawn of the Infinites: Galakrond's Fall"] = 480,
+        ["Dawn of the Infinites: Murozond's Rise"] = 485,
+        ["Brackenhide Hollow"] = 470,
+        ["Neltharus"] = 470,
+        ["The Azure Vault"] = 475,
+        ["The Nokhud Offensive"] = 475
+    }
+    
+    return baseLevels[dungeonName] or 470
+end
+
+function MatchCreator:CalculateGroupScore(groupAnalysis)
+    local score = 70 -- Base score
+    
+    -- Role quality bonuses
+    for role, data in pairs(groupAnalysis.roles) do
+        if data.filled >= data.needed then
+            score = score + (data.quality * 0.2) -- Quality contributes to score
+        else
+            score = score - 20 -- Penalty for unfilled roles
+        end
+    end
+    
+    -- Critical gap penalties
+    for _, gap in ipairs(groupAnalysis.criticalGaps) do
+        if gap.severity == "CRITICAL" then
+            score = score - 25
+        elseif gap.severity == "HIGH" then
+            score = score - 15
+        else
+            score = score - 5
+        end
+    end
+    
+    return math.min(100, math.max(0, score))
+end
+
+-- Smart suggestion tab for the main UI
+function MatchCreator:UpdateSmartSuggestionsTab(recommendations)
+    local tabIndex = 6 -- New tab
+    
+    -- Add smart suggestions tab if it doesn't exist
+    if not MatchCreatorFrame.tabs[6] then
+        self:AddSmartSuggestionsTab()
+    end
+    
+    local content = MatchCreatorFrame.tabContents[6]
+    self:ClearTabContent(6)
+    
+    local yOffset = -10
+    
+    -- Title
+    local title = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    title:SetText("|cFF00FF96Smart Suggestions|r")
+    table.insert(content.elements, title)
+    yOffset = yOffset - 30
+    
+    -- Current group analysis
+    local groupAnalysis = self:AnalyzeCurrentGroupComposition()
+    if groupAnalysis then
+        -- Group score
+        local scoreText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        scoreText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        local scoreColor = groupAnalysis.overallScore >= 80 and "|cFF00FF00" or 
+                          groupAnalysis.overallScore >= 60 and "|cFFFFAA00" or "|cFFFF4444"
+        scoreText:SetText("Group Compatibility: " .. scoreColor .. groupAnalysis.overallScore .. "%|r")
+        table.insert(content.elements, scoreText)
+        yOffset = yOffset - 25
+        
+        -- Critical gaps
+        if #groupAnalysis.criticalGaps > 0 then
+            local gapTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            gapTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+            gapTitle:SetText("|cFFFF4444Critical Gaps:|r")
+            table.insert(content.elements, gapTitle)
+            yOffset = yOffset - 20
+            
+            for _, gap in ipairs(groupAnalysis.criticalGaps) do
+                local gapText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                gapText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+                gapText:SetWidth(420)
+                local severityColor = gap.severity == "CRITICAL" and "|cFFFF0000" or 
+                                    gap.severity == "HIGH" and "|cFFFF6600" or "|cFFFFAA00"
+                gapText:SetText(severityColor .. "• " .. gap.message .. "|r")
+                gapText:SetJustifyH("LEFT")
+                table.insert(content.elements, gapText)
+                yOffset = yOffset - 16
+            end
+            yOffset = yOffset - 10
+        end
+        
+        -- Recruitment suggestions
+        if groupAnalysis.recommendations and groupAnalysis.recommendations.priority then
+            local recTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            recTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+            recTitle:SetText("|cFF00FF00Priority Recruitment:|r")
+            table.insert(content.elements, recTitle)
+            yOffset = yOffset - 20
+            
+            for _, suggestion in ipairs(groupAnalysis.recommendations.priority) do
+                -- Create suggestion card
+                local card = self:CreateSuggestionCard(content.child, suggestion, yOffset)
+                yOffset = yOffset - 70
+            end
+        end
+        
+        -- Warnings
+        if #groupAnalysis.warnings > 0 then
+            yOffset = yOffset - 10
+            local warnTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            warnTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+            warnTitle:SetText("|cFFFFAA00Group Warnings:|r")
+            table.insert(content.elements, warnTitle)
+            yOffset = yOffset - 20
+            
+            for _, warning in ipairs(groupAnalysis.warnings) do
+                local warnText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                warnText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 20, yOffset)
+                warnText:SetWidth(420)
+                local severityColor = warning.severity == "CRITICAL" and "|cFFFF0000" or 
+                                    warning.severity == "HIGH" and "|cFFFF6600" or 
+                                    warning.severity == "MEDIUM" and "|cFFFFAA00" or "|cFFFFFFFF"
+                warnText:SetText(severityColor .. "⚠ " .. warning.message .. "|r")
+                warnText:SetJustifyH("LEFT")
+                table.insert(content.elements, warnText)
+                yOffset = yOffset - 16
+                
+                if warning.suggestion then
+                    local sugText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                    sugText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 30, yOffset)
+                    sugText:SetWidth(410)
+                    sugText:SetText("|cFF888888→ " .. warning.suggestion .. "|r")
+                    sugText:SetJustifyH("LEFT")
+                    table.insert(content.elements, sugText)
+                    yOffset = yOffset - 16
+                end
+            end
+        end
+        
+        -- Auto-refresh timer
+        yOffset = yOffset - 15
+        local refreshText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        refreshText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        refreshText:SetText("|cFF666666Auto-updating every 5 seconds...|r")
+        table.insert(content.elements, refreshText)
+    else
+        -- No group analysis available
+        local noGroupText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        noGroupText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        noGroupText:SetText("|cFF888888Not in a group or no dungeon selected|r")
+        table.insert(content.elements, noGroupText)
+    end
+    
+    -- Set content height
+    local contentHeight = math.abs(yOffset) + 50
+    content.child:SetHeight(contentHeight)
+end
+
+-- Add smart suggestions tab
+function MatchCreator:AddSmartSuggestionsTab()
+    if not MatchCreatorFrame then return end
+    
+    local frame = MatchCreatorFrame
+    local tabCount = #frame.tabs + 1
+    
+    -- Create new tab button
+    local tab = CreateFrame("Button", "MatchCreatorTab"..tabCount, frame, "TabButtonTemplate")
+    tab:SetSize(95, 32)
+    tab:SetPoint("TOPLEFT", frame, "BOTTOMLEFT", (tabCount-1) * 95, 2)
+    tab:SetText("Smart")
+    tab.tabIndex = tabCount
+    
+    tab:SetScript("OnClick", function(self)
+        MatchCreator:SelectTab(self.tabIndex)
+    end)
+    
+    frame.tabs[tabCount] = tab
+    
+    -- Create content frame
+    local content = CreateFrame("ScrollFrame", "MatchCreatorContent"..tabCount, frame, "UIPanelScrollFrameTemplate")
+    content:SetPoint("TOPLEFT", frame.Inset, "TOPLEFT", 4, -4)
+    content:SetPoint("BOTTOMRIGHT", frame.Inset, "BOTTOMRIGHT", -24, 4)
+    
+    local contentChild = CreateFrame("Frame", nil, content)
+    contentChild:SetSize(460, 400)
+    content:SetScrollChild(contentChild)
+    content:Hide()
+    
+    frame.tabContents[tabCount] = {frame = content, child = contentChild, elements = {}}
+end
+
+-- Create suggestion card
+function MatchCreator:CreateSuggestionCard(parent, suggestion, yOffset)
+    local card = CreateFrame("Frame", nil, parent)
+    card:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, yOffset)
+    card:SetSize(440, 60)
+    
+    -- Background
+    local bg = card:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.15, 0.15, 0.15, 0.8)
+    
+    -- Priority indicator
+    local priority = CreateFrame("Frame", nil, card)
+    priority:SetPoint("LEFT", card, "LEFT", 0, 0)
+    priority:SetSize(8, 60)
+    
+    local priorityTexture = priority:CreateTexture(nil, "ARTWORK")
+    priorityTexture:SetAllPoints()
+    priorityTexture:SetColorTexture(0.2, 0.8, 0.2, 0.9) -- Green for priority
+    
+    -- Role text
+    local roleText = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    roleText:SetPoint("LEFT", priority, "RIGHT", 10, 15)
+    roleText:SetText("|cFFFFD700" .. suggestion.role .. " NEEDED|r")
+    
+    -- Reason text
+    local reasonText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    reasonText:SetPoint("LEFT", priority, "RIGHT", 10, -5)
+    reasonText:SetWidth(350)
+    reasonText:SetJustifyH("LEFT")
+    reasonText:SetText(suggestion.reason)
+    
+    -- Recommended specs
+    if suggestion.specs then
+        local specText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        specText:SetPoint("LEFT", priority, "RIGHT", 10, -20)
+        specText:SetWidth(350)
+        specText:SetJustifyH("LEFT")
+        
+        local formattedSpecs = {}
+        for _, spec in ipairs(suggestion.specs) do
+            local formatted = string.gsub(spec, "_", " ")
+            table.insert(formattedSpecs, formatted)
+        end
+        
+        specText:SetText("|cFF88FF88Recommended: " .. table.concat(formattedSpecs, ", ") .. "|r")
+    end
+    
+    return card
+end
+
+-- Real-time applicant monitoring system
+function MatchCreator:StartApplicantMonitoring()
+    if self.applicantMonitorTimer then return end
+    
+    self.applicantMonitorTimer = C_Timer.NewTicker(2, function()
+        self:MonitorApplicants()
+    end)
+end
+
+function MatchCreator:StopApplicantMonitoring()
+    if self.applicantMonitorTimer then
+        self.applicantMonitorTimer:Cancel()
+        self.applicantMonitorTimer = nil
+    end
+end
+
+function MatchCreator:MonitorApplicants()
+    if not C_LFGList.HasActiveEntryInfo() then return end
+    
+    local applicants = C_LFGList.GetApplicants()
+    if not applicants or #applicants == 0 then return end
+    
+    -- Process new applicants
+    for _, applicantID in ipairs(applicants) do
+        if not self.applicantTracking[applicantID] then
+            local applicantInfo = C_LFGList.GetApplicantInfo(applicantID)
+            if applicantInfo then
+                local analysis = self:AnalyzeApplicant({
+                    applicantID = applicantID,
+                    name = applicantInfo.name,
+                    class = applicantInfo.classDisplayName,
+                    spec = applicantInfo.specDisplayName,
+                    role = applicantInfo.role,
+                    itemLevel = applicantInfo.itemLevel
+                })
+                
+                if analysis then
+                    self.applicantTracking[applicantID] = analysis
+                    
+                    -- Show notification for high-priority applicants
+                    if analysis.priority >= 4 then
+                        self:ShowApplicantNotification(analysis)
+                    end
+                    
+                    -- Critical utility notifications
+                    local groupAnalysis = self:AnalyzeCurrentGroupComposition()
+                    if groupAnalysis and #groupAnalysis.criticalGaps > 0 then
+                        for _, gap in ipairs(groupAnalysis.criticalGaps) do
+                            if self:ApplicantFillsGap(analysis, gap) then
+                                self:ShowCriticalGapNotification(analysis, gap)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+-- Check if applicant fills a critical gap
+function MatchCreator:ApplicantFillsGap(analysis, gap)
+    local utilities = self:GetSpecUtilities(analysis.class .. "_" .. analysis.spec, string.lower(analysis.role))
+    if not utilities then return false end
+    
+    if gap.type == "interrupt" and string.find(utilities, "Interrupt") then
+        return true
+    elseif gap.type == "dispel" and string.find(utilities, "Dispel") then
+        return true
+    elseif gap.type == "enrageRemoval" and string.find(utilities, "Soothe") then
+        return true
+    end
+    
+    return false
+end
+
+-- Show applicant notification
+function MatchCreator:ShowApplicantNotification(analysis)
+    -- Create notification frame
+    local notification = CreateFrame("Frame", nil, UIParent)
+    notification:SetSize(350, 80)
+    notification:SetPoint("TOP", UIParent, "TOP", 0, -100)
+    notification:SetFrameStrata("HIGH")
+    
+    -- Background with glow effect
+    local bg = notification:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.1, 0.7, 0.2, 0.95)
+    
+    local border = CreateFrame("Frame", nil, notification, "GlowBorderTemplate")
+    border:SetAllPoints()
+    
+    -- Title
+    local title = notification:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", notification, "TOP", 0, -10)
+    title:SetText("|cFFFFFFFFExcellent Applicant!|r")
+    
+    -- Details
+    local details = notification:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    details:SetPoint("CENTER", notification, "CENTER", 0, -5)
+    details:SetText(string.format("|cFF00FF00%s|r (%s %s) - |cFFFFD700%d%% match|r", 
+        analysis.name, analysis.class, analysis.spec, analysis.rating))
+    
+    -- Strengths
+    if #analysis.strengths > 0 then
+        local strengthText = notification:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        strengthText:SetPoint("BOTTOM", notification, "BOTTOM", 0, 8)
+        strengthText:SetText("|cFF88FF88" .. analysis.strengths[1] .. "|r")
+    end
+    
+    -- Sound alert
+    PlaySound(SOUNDKIT.READY_CHECK)
+    
+    -- Auto-hide
+    C_Timer.After(6, function()
+        if notification then
+            UIFrameFadeOut(notification, 0.5, notification:GetAlpha(), 0)
+            C_Timer.After(0.5, function()
+                if notification then
+                    notification:Hide()
+                end
+            end)
+        end
+    end)
+end
+
+-- Show critical gap notification
+function MatchCreator:ShowCriticalGapNotification(analysis, gap)
+    local notification = CreateFrame("Frame", nil, UIParent)
+    notification:SetSize(380, 90)
+    notification:SetPoint("TOP", UIParent, "TOP", 0, -200)
+    notification:SetFrameStrata("HIGH")
+    
+    -- Critical background
+    local bg = notification:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(0.8, 0.1, 0.1, 0.95)
+    
+    local border = CreateFrame("Frame", nil, notification, "GlowBorderTemplate")
+    border:SetAllPoints()
+    
+    -- Title
+    local title = notification:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", notification, "TOP", 0, -10)
+    title:SetText("|cFFFFFFFFCRITICAL UTILITY FOUND!|r")
+    
+    -- Gap info
+    local gapText = notification:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    gapText:SetPoint("CENTER", notification, "CENTER", 0, 5)
+    gapText:SetWidth(360)
+    gapText:SetText(string.format("|cFFFF6666%s|r", gap.message))
+    gapText:SetJustifyH("CENTER")
+    
+    -- Applicant info
+    local applicantText = notification:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    applicantText:SetPoint("BOTTOM", notification, "BOTTOM", 0, 15)
+    applicantText:SetText(string.format("|cFF00FF00%s (%s %s) can solve this!|r", 
+        analysis.name, analysis.class, analysis.spec))
+    
+    -- Urgent sound
+    PlaySound(SOUNDKIT.RAID_WARNING)
+    
+    -- Longer display time for critical notifications
+    C_Timer.After(10, function()
+        if notification then
+            UIFrameFadeOut(notification, 1, notification:GetAlpha(), 0)
+            C_Timer.After(1, function()
+                if notification then
+                    notification:Hide()
+                end
+            end)
+        end
+    end)
+end
+
+-- Auto-refresh smart suggestions
+function MatchCreator:StartSmartSuggestionsAutoRefresh()
+    if self.smartRefreshTimer then return end
+    
+    self.smartRefreshTimer = C_Timer.NewTicker(5, function()
+        if MatchCreatorFrame and MatchCreatorFrame:IsShown() and MatchCreatorFrame.activeTab == 6 then
+            self:RefreshTabContent(6)
+        end
+    end)
+end
+
+function MatchCreator:StopSmartSuggestionsAutoRefresh()
+    if self.smartRefreshTimer then
+        self.smartRefreshTimer:Cancel()
+        self.smartRefreshTimer = nil
+    end
+end
+
+-- Initialize smart suggestions system
+function MatchCreator:InitializeSmartSuggestions()
+    -- Hook into LFG system
+    self:HookIntoLFGApplicantSystem()
+    
+    -- Start monitoring when group is created
+    local smartFrame = CreateFrame("Frame")
+    smartFrame:RegisterEvent("LFG_LIST_ACTIVE_ENTRY_UPDATE")
+    smartFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
+    
+    smartFrame:SetScript("OnEvent", function(self, event, ...)
+        if event == "LFG_LIST_ACTIVE_ENTRY_UPDATE" then
+            if C_LFGList.HasActiveEntryInfo() then
+                MatchCreator:StartApplicantMonitoring()
+                MatchCreator:StartSmartSuggestionsAutoRefresh()
+            else
+                MatchCreator:StopApplicantMonitoring()
+                MatchCreator:StopSmartSuggestionsAutoRefresh()
+            end
+        elseif event == "GROUP_ROSTER_UPDATE" then
+            -- Refresh analysis when group changes
+            if MatchCreatorFrame and MatchCreatorFrame.activeTab == 6 then
+                MatchCreator:RefreshTabContent(6)
+            end
+        end
+    end)
+end
+
+-- Enhanced tab content refresh to include smart suggestions
+local originalRefreshTabContent = MatchCreator.RefreshTabContent
+function MatchCreator:RefreshTabContent(tabIndex)
+    if tabIndex == 6 then
+        -- Smart suggestions tab
+        local currentDungeon = self:GetCurrentDungeon()
+        if currentDungeon then
+            local recommendations = self:GetDungeonRecommendations(currentDungeon)
+            local affixes = self:GetCurrentAffixes()
+            
+            if affixes then
+                recommendations = self:GetAffixAdjustedRecommendations(currentDungeon, affixes)
+            end
+            
+            self:UpdateSmartSuggestionsTab(recommendations)
+        end
+    else
+        -- Call original function for other tabs
+        originalRefreshTabContent(self, tabIndex)
+    end
+end
+
+-- Initialize minimap button and smart suggestions on load
+local function InitializeAddon()
+    if MatchCreator.minimapButton then return end
+    MatchCreator.minimapButton = MatchCreator:CreateMinimapButton()
+    MatchCreator:InitializeSmartSuggestions()
+end
+
+-- Hook into addon loading
+local initFrame = CreateFrame("Frame")
+initFrame:RegisterEvent("ADDON_LOADED")
+initFrame:RegisterEvent("PLAYER_LOGIN")
+initFrame:SetScript("OnEvent", function(self, event, addonName)
+    if (event == "ADDON_LOADED" and addonName == "MatchCreator") or event == "PLAYER_LOGIN" then
+        InitializeAddon()
+        print("|cFF00FF00Match Creator|r loaded! Use /mc for commands or click the minimap button.")
+        print("|cFF88FF88Smart Suggestions:|r Real-time applicant analysis and group optimization active!")
+    end
+end)-- Enhanced slash commands with UI controls
 SLASH_MATCHCREATOR1 = "/matchcreator"
 SLASH_MATCHCREATOR2 = "/mc"
 SlashCmdList["MATCHCREATOR"] = function(msg)
@@ -54,7 +622,951 @@ SlashCmdList["MATCHCREATOR"] = function(msg)
         end
         
     elseif cmd == "tab" then
-        local tab-- Enhanced boss encounter analysis
+        local tabNum = tonumber(args[2])
+        if tabNum and tabNum >= 1 and tabNum <= 5 then
+            if MatchCreatorFrame then
+                MatchCreator:SelectTab(tabNum)
+            end
+        else
+            print("|cFFFF0000Error:|r Tab number must be 1-5")
+        end
+        
+    elseif cmd == "list" then
+        print("|cFF00FF00Available Dungeons:|r")
+        for dungeonName, _ in pairs(MatchCreator.dungeonData or {}) do
+            print("  • " .. dungeonName)
+        end
+        
+    elseif cmd == "analyze" then
+        local dungeonName = table.concat(args, " ", 2)
+        if dungeonName and dungeonName ~= "" then
+            local recommendations = MatchCreator:GetDungeonRecommendations(dungeonName)
+            if recommendations then
+                print("|cFF00FF00Analysis for " .. dungeonName .. ":|r")
+                print("Top mechanics:")
+                for mechanic, value in pairs(recommendations.summary) do
+                    local color = value >= 80 and "|cFFFF4444" or value >= 60 and "|cFFFFAA00" or "|cFFFFFFFF"
+                    print(string.format("  %s%s: %d%%|r", color, MatchCreator:FormatMechanicName(mechanic), value))
+                end
+            else
+                print("|cFFFF0000Error:|r Dungeon not found or no data available")
+            end
+        else
+            print("|cFFFF0000Error:|r Please specify a dungeon name")
+        end
+        
+    elseif cmd == "settings" then
+        MatchCreator:ShowSettingsFrame()
+        
+    elseif cmd == "reset" then
+        if MatchCreatorFrame then
+            MatchCreatorFrame:Hide()
+            MatchCreatorFrame = nil
+        end
+        MatchCreator:CreateRecommendationFrame()
+        print("|cFF00FF00Match Creator:|r UI reset successfully")
+        
+    else
+        print("|cFF00FF00Match Creator Commands:|r")
+        print("/mc show - Show recommendations window")
+        print("/mc hide - Hide recommendations window") 
+        print("/mc toggle - Toggle window visibility")
+        print("/mc test [dungeon] - Test with specific dungeon")
+        print("/mc tab [1-5] - Switch to specific tab")
+        print("/mc list - List available dungeons")
+        print("/mc analyze [dungeon] - Quick dungeon analysis")
+        print("/mc settings - Open settings panel")
+        print("/mc reset - Reset UI")
+        print("")
+        print("|cFFFFAA00Tabs:|r 1=Overview, 2=Tanks, 3=Healers, 4=DPS, 5=Mechanics")
+    end
+end
+
+-- Settings frame
+function MatchCreator:ShowSettingsFrame()
+    if MatchCreatorSettingsFrame then
+        MatchCreatorSettingsFrame:Show()
+        return
+    end
+    
+    local frame = CreateFrame("Frame", "MatchCreatorSettingsFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame:SetSize(400, 350)
+    frame:SetPoint("CENTER", 0, 0)
+    frame.title = frame:CreateFontString(nil, "OVERLAY")
+    frame.title:SetFontObject("GameFontHighlight")
+    frame.title:SetPoint("LEFT", frame.TitleBg, "LEFT", 5, 0)
+    frame.title:SetText("Match Creator - Settings")
+    
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    
+    local yOffset = -40
+    
+    -- Auto-show setting
+    local autoShowCheck = CreateFrame("CheckButton", "MCAutoShow", frame, "InterfaceOptionsCheckButtonTemplate")
+    autoShowCheck:SetPoint("TOPLEFT", frame, "TOPLEFT", 20, yOffset)
+    autoShowCheck.Text:SetText("Auto-show when Group Finder opens")
+    autoShowCheck:SetChecked(true)
+    yOffset = yOffset - 30
+    
+    -- Show affixes setting
+    local showAffixesCheck = CreateFrame("CheckButton", "MCShowAffixes", frame, "InterfaceOptionsCheckButtonTemplate")
+    showAffixesCheck:SetPoint("TOPLEFT", frame, "TOPLEFT", 20, yOffset)
+    showAffixesCheck.Text:SetText("Show current week affixes")
+    showAffixesCheck:SetChecked(true)
+    yOffset = yOffset - 30
+    
+    -- Position near Group Finder
+    local positionCheck = CreateFrame("CheckButton", "MCPosition", frame, "InterfaceOptionsCheckButtonTemplate")
+    positionCheck:SetPoint("TOPLEFT", frame, "TOPLEFT", 20, yOffset)
+    positionCheck.Text:SetText("Auto-position near Group Finder")
+    positionCheck:SetChecked(true)
+    yOffset = yOffset - 40
+    
+    -- UI Scale slider
+    local scaleText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    scaleText:SetPoint("TOPLEFT", frame, "TOPLEFT", 20, yOffset)
+    scaleText:SetText("UI Scale:")
+    
+    local scaleSlider = CreateFrame("Slider", "MCScaleSlider", frame, "OptionsSliderTemplate")
+    scaleSlider:SetPoint("LEFT", scaleText, "RIGHT", 20, 0)
+    scaleSlider:SetMinMaxValues(0.7, 1.3)
+    scaleSlider:SetValue(1.0)
+    scaleSlider:SetValueStep(0.1)
+    scaleSlider:SetWidth(200)
+    MCScaleSliderLow:SetText("70%")
+    MCScaleSliderHigh:SetText("130%")
+    
+    scaleSlider:SetScript("OnValueChanged", function(self, value)
+        MCScaleSliderText:SetText(string.format("%.0f%%", value * 100))
+        if MatchCreatorFrame then
+            MatchCreatorFrame:SetScale(value)
+        end
+    end)
+    MCScaleSliderText:SetText("100%")
+    yOffset = yOffset - 60
+    
+    -- Default tab dropdown
+    local tabText = frame:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    tabText:SetPoint("TOPLEFT", frame, "TOPLEFT", 20, yOffset)
+    tabText:SetText("Default Tab:")
+    
+    local tabDropdown = CreateFrame("Frame", "MCTabDropdown", frame, "UIDropDownMenuTemplate")
+    tabDropdown:SetPoint("LEFT", tabText, "RIGHT", 10, -5)
+    
+    local tabOptions = {
+        {text = "Overview", value = 1},
+        {text = "Tanks", value = 2},
+        {text = "Healers", value = 3},
+        {text = "DPS", value = 4},
+        {text = "Mechanics", value = 5}
+    }
+    
+    local function TabDropdown_OnClick(self)
+        UIDropDownMenu_SetSelectedValue(tabDropdown, self.value)
+        -- Set default tab preference
+        MatchCreator.defaultTab = self.value
+    end
+    
+    local function TabDropdown_Initialize(self, level)
+        for _, option in ipairs(tabOptions) do
+            local info = UIDropDownMenu_CreateInfo()
+            info.text = option.text
+            info.value = option.value
+            info.func = TabDropdown_OnClick
+            UIDropDownMenu_AddButton(info, level)
+        end
+    end
+    
+    UIDropDownMenu_Initialize(tabDropdown, TabDropdown_Initialize)
+    UIDropDownMenu_SetSelectedValue(tabDropdown, 1)
+    UIDropDownMenu_SetWidth(tabDropdown, 120)
+    yOffset = yOffset - 60
+    
+    -- Save/Cancel buttons
+    local saveButton = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    saveButton:SetPoint("BOTTOMRIGHT", frame, "BOTTOMRIGHT", -20, 20)
+    saveButton:SetSize(80, 25)
+    saveButton:SetText("Save")
+    saveButton:SetScript("OnClick", function()
+        -- Save settings logic would go here
+        print("|cFF00FF00Match Creator:|r Settings saved")
+        frame:Hide()
+    end)
+    
+    local cancelButton = CreateFrame("Button", nil, frame, "GameMenuButtonTemplate")
+    cancelButton:SetPoint("RIGHT", saveButton, "LEFT", -10, 0)
+    cancelButton:SetSize(80, 25)
+    cancelButton:SetText("Cancel")
+    cancelButton:SetScript("OnClick", function()
+        frame:Hide()
+    end)
+    
+    frame:Show()
+end
+
+-- Minimap button integration
+function MatchCreator:CreateMinimapButton()
+    local button = CreateFrame("Button", "MatchCreatorMinimapButton", Minimap)
+    button:SetSize(32, 32)
+    button:SetFrameStrata("MEDIUM")
+    button:SetFrameLevel(8)
+    button:SetPoint("TOPLEFT", Minimap, "TOPLEFT", -15, 5)
+    
+    -- Button texture
+    local texture = button:CreateTexture(nil, "BACKGROUND")
+    texture:SetSize(20, 20)
+    texture:SetPoint("CENTER", button, "CENTER", 0, 0)
+    texture:SetTexture("Interface\\Icons\\Achievement_Boss_Murmur")
+    
+    -- Border
+    local border = button:CreateTexture(nil, "OVERLAY")
+    border:SetSize(52, 52)
+    border:SetPoint("CENTER", button, "CENTER", 0, 0)
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    
+    -- Click handlers
+    button:SetScript("OnClick", function(self, btn)
+        if btn == "LeftButton" then
+            SlashCmdList["MATCHCREATOR"]("toggle")
+        elseif btn == "RightButton" then
+            SlashCmdList["MATCHCREATOR"]("settings")
+        end
+    end)
+    
+    -- Tooltip
+    button:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:SetText("Match Creator", 1, 1, 1)
+        GameTooltip:AddLine("Left-click: Toggle window", 0.7, 0.7, 0.7)
+        GameTooltip:AddLine("Right-click: Settings", 0.7, 0.7, 0.7)
+        GameTooltip:Show()
+    end)
+    
+    button:SetScript("OnLeave", function(self)
+        GameTooltip:Hide()
+    end)
+    
+    -- Dragging functionality
+    local function UpdatePosition()
+        local xpos, ypos = GetCursorPosition()
+        local xmin, ymin = Minimap:GetLeft(), Minimap:GetBottom()
+        
+        xpos = xmin - xpos / UIParent:GetScale() + 70
+        ypos = ypos / UIParent:GetScale() - ymin - 70
+        
+        local angle = math.atan2(ypos, xpos)
+        local x, y = 80 * cos(angle), 80 * sin(angle)
+        button:SetPoint("CENTER", Minimap, "CENTER", x, y)
+    end
+    
+    button:SetScript("OnDragStart", function(self)
+        self:SetScript("OnUpdate", UpdatePosition)
+    end)
+    
+    button:SetScript("OnDragStop", function(self)
+        self:SetScript("OnUpdate", nil)
+    end)
+    
+    button:RegisterForDrag("LeftButton")
+    button:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    
+    return button
+end
+
+-- Group composition analyzer
+function MatchCreator:AnalyzeCurrentGroup()
+    if not IsInGroup() then
+        return nil, "Not in a group"
+    end
+    
+    local groupComp = {
+        tanks = {},
+        healers = {},
+        dps = {},
+        utilities = {
+            interrupt = 0,
+            dispel = 0,
+            enrageRemoval = 0,
+            mobility = 0
+        }
+    }
+    
+    local numMembers = GetNumGroupMembers()
+    for i = 1, numMembers do
+        local unit = "party" .. i
+        if UnitExists(unit) then
+            local _, class = UnitClass(unit)
+            local spec = GetInspectSpecialization(unit)
+            
+            if class and spec then
+                local role = GetSpecializationRole(spec)
+                local specName = class .. "_" .. (select(2, GetSpecializationInfo(spec)) or "Unknown")
+                
+                if role == "TANK" then
+                    table.insert(groupComp.tanks, specName)
+                elseif role == "HEALER" then
+                    table.insert(groupComp.healers, specName)
+                elseif role == "DAMAGER" then
+                    table.insert(groupComp.dps, specName)
+                end
+                
+                -- Add utility tracking
+                local utilities = self:GetSpecUtilities(specName, string.lower(role))
+                if utilities then
+                    -- Parse utilities and add to counters
+                    if string.find(utilities, "Interrupt") then
+                        groupComp.utilities.interrupt = groupComp.utilities.interrupt + 1
+                    end
+                    if string.find(utilities, "Dispel") then
+                        groupComp.utilities.dispel = groupComp.utilities.dispel + 1
+                    end
+                    if string.find(utilities, "Soothe") then
+                        groupComp.utilities.enrageRemoval = groupComp.utilities.enrageRemoval + 1
+                    end
+                end
+            end
+        end
+    end
+    
+    return groupComp
+end
+
+-- Group compatibility checker
+function MatchCreator:CheckGroupCompatibility(dungeonName)
+    local groupComp = self:AnalyzeCurrentGroup()
+    if not groupComp then
+        return nil, "Unable to analyze group composition"
+    end
+    
+    local dungeonData = self.dungeonData[dungeonName]
+    if not dungeonData then
+        return nil, "Dungeon data not available"
+    end
+    
+    local compatibility = {
+        overall = 0,
+        issues = {},
+        strengths = {},
+        suggestions = {}
+    }
+    
+    -- Check critical mechanics coverage
+    local mechanics = dungeonData.mechanics
+    
+    if mechanics.interrupt and mechanics.interrupt >= 80 and groupComp.utilities.interrupt < 2 then
+        table.insert(compatibility.issues, "Insufficient interrupt coverage for high interrupt requirement")
+        compatibility.overall = compatibility.overall - 20
+    end
+    
+    if mechanics.dispel and mechanics.dispel >= 80 and groupComp.utilities.dispel < 1 then
+        table.insert(compatibility.issues, "No dispel coverage for high dispel requirement")
+        compatibility.overall = compatibility.overall - 25
+    end
+    
+    if mechanics.enrageRemoval and mechanics.enrageRemoval >= 80 and groupComp.utilities.enrageRemoval < 1 then
+        table.insert(compatibility.issues, "No enrage removal for high enrage requirement")
+        compatibility.overall = compatibility.overall - 30
+    end
+    
+    -- Calculate base compatibility
+    compatibility.overall = compatibility.overall + 70 -- Base score
+    
+    if #compatibility.issues == 0 then
+        compatibility.overall = math.min(100, compatibility.overall + 20)
+        table.insert(compatibility.strengths, "Good utility coverage for dungeon requirements")
+    end
+    
+    return compatibility
+end
+
+-- Smart Suggestions System
+MatchCreator.smartSuggestions = {}
+MatchCreator.groupAnalysis = {}
+MatchCreator.applicantTracking = {}
+
+-- Real-time applicant analysis
+function MatchCreator:AnalyzeApplicant(applicantInfo)
+    if not applicantInfo then return nil end
+    
+    local currentDungeon = self:GetCurrentDungeon()
+    if not currentDungeon then return nil end
+    
+    local dungeonData = self.dungeonData[currentDungeon]
+    if not dungeonData then return nil end
+    
+    local analysis = {
+        applicantID = applicantInfo.applicantID,
+        name = applicantInfo.name,
+        class = applicantInfo.class,
+        spec = applicantInfo.spec,
+        role = applicantInfo.role,
+        itemLevel = applicantInfo.itemLevel,
+        rating = 0,
+        strengths = {},
+        concerns = {},
+        recommendation = "UNKNOWN",
+        priority = 0
+    }
+    
+    -- Get base rating for this spec in current dungeon
+    local specKey = applicantInfo.class .. "_" .. applicantInfo.spec
+    local roleSpecs = dungeonData.preferredSpecs[string.lower(applicantInfo.role)]
+    
+    if roleSpecs and roleSpecs[specKey] then
+        analysis.rating = roleSpecs[specKey]
+    else
+        -- Calculate estimated rating based on role and class utilities
+        analysis.rating = self:EstimateSpecRating(specKey, applicantInfo.role, currentDungeon)
+    end
+    
+    -- Adjust for current affixes
+    local affixes = self:GetCurrentAffixes()
+    if affixes then
+        local affixAdjustment = self:CalculateAffixCompatibility(specKey, affixes)
+        analysis.rating = math.min(100, math.max(0, analysis.rating + affixAdjustment))
+    end
+    
+    -- Item level considerations
+    local expectedIlvl = self:GetExpectedItemLevel(currentDungeon)
+    if applicantInfo.itemLevel < expectedIlvl - 15 then
+        analysis.rating = analysis.rating - 10
+        table.insert(analysis.concerns, "Item level below recommended (" .. applicantInfo.itemLevel .. " vs " .. expectedIlvl .. ")")
+    elseif applicantInfo.itemLevel > expectedIlvl + 10 then
+        analysis.rating = analysis.rating + 5
+        table.insert(analysis.strengths, "Well-geared for content")
+    end
+    
+    -- Analyze utility coverage
+    local utilities = self:GetSpecUtilities(specKey, string.lower(applicantInfo.role))
+    if utilities then
+        local dungeonMechanics = dungeonData.mechanics
+        
+        -- Check for critical utilities
+        if dungeonMechanics.interrupt >= 80 and string.find(utilities, "Interrupt") then
+            table.insert(analysis.strengths, "Provides critical interrupt coverage")
+            analysis.rating = analysis.rating + 5
+        end
+        
+        if dungeonMechanics.dispel >= 80 and string.find(utilities, "Dispel") then
+            table.insert(analysis.strengths, "Provides essential dispel utility")
+            analysis.rating = analysis.rating + 8
+        end
+        
+        if dungeonMechanics.enrageRemoval >= 80 and string.find(utilities, "Soothe") then
+            table.insert(analysis.strengths, "Can handle enrage mechanics")
+            analysis.rating = analysis.rating + 10
+        end
+    end
+    
+    -- Set recommendation level
+    if analysis.rating >= 90 then
+        analysis.recommendation = "EXCELLENT"
+        analysis.priority = 5
+    elseif analysis.rating >= 80 then
+        analysis.recommendation = "GOOD"
+        analysis.priority = 4
+    elseif analysis.rating >= 70 then
+        analysis.recommendation = "ACCEPTABLE"
+        analysis.priority = 3
+    elseif analysis.rating >= 60 then
+        analysis.recommendation = "RISKY"
+        analysis.priority = 2
+        table.insert(analysis.concerns, "Spec may struggle with dungeon mechanics")
+    else
+        analysis.recommendation = "AVOID"
+        analysis.priority = 1
+        table.insert(analysis.concerns, "Poor fit for this dungeon's requirements")
+    end
+    
+    return analysis
+end
+
+-- Real-time group composition analysis
+function MatchCreator:AnalyzeCurrentGroupComposition()
+    local groupComp = self:AnalyzeCurrentGroup()
+    if not groupComp then return nil end
+    
+    local currentDungeon = self:GetCurrentDungeon()
+    if not currentDungeon then return nil end
+    
+    local dungeonData = self.dungeonData[currentDungeon]
+    if not dungeonData then return nil end
+    
+    local analysis = {
+        timestamp = time(),
+        dungeon = currentDungeon,
+        roles = {
+            tank = {filled = #groupComp.tanks, needed = 1, quality = 0},
+            healer = {filled = #groupComp.healers, needed = 1, quality = 0},
+            dps = {filled = #groupComp.dps, needed = 3, quality = 0}
+        },
+        utilities = groupComp.utilities,
+        overallScore = 0,
+        criticalGaps = {},
+        recommendations = {},
+        warnings = {}
+    }
+    
+    -- Analyze each filled role
+    for roleType, roleData in pairs(analysis.roles) do
+        local specs = groupComp[roleType .. "s"] -- tanks, healers, dps
+        local totalRating = 0
+        local count = 0
+        
+        for _, specName in ipairs(specs) do
+            local roleSpecs = dungeonData.preferredSpecs[roleType]
+            if roleSpecs and roleSpecs[specName] then
+                totalRating = totalRating + roleSpecs[specName]
+                count = count + 1
+            end
+        end
+        
+        if count > 0 then
+            roleData.quality = totalRating / count
+        end
+    end
+    
+    -- Check for critical utility gaps
+    local mechanics = dungeonData.mechanics
+    
+    if mechanics.interrupt >= 80 and analysis.utilities.interrupt < 2 then
+        table.insert(analysis.criticalGaps, {
+            type = "interrupt",
+            severity = "HIGH",
+            message = "Insufficient interrupt coverage (" .. analysis.utilities.interrupt .. "/2+ needed)"
+        })
+    end
+    
+    if mechanics.dispel >= 80 and analysis.utilities.dispel < 1 then
+        table.insert(analysis.criticalGaps, {
+            type = "dispel", 
+            severity = "CRITICAL",
+            message = "No dispel coverage (REQUIRED for this dungeon)"
+        })
+    end
+    
+    if mechanics.enrageRemoval >= 80 and analysis.utilities.enrageRemoval < 1 then
+        table.insert(analysis.criticalGaps, {
+            type = "enrageRemoval",
+            severity = "CRITICAL", 
+            message = "No enrage removal (REQUIRED for this dungeon)"
+        })
+    end
+    
+    -- Generate recruitment recommendations
+    analysis.recommendations = self:GenerateRecruitmentSuggestions(analysis, dungeonData)
+    
+    -- Check for problematic combinations
+    analysis.warnings = self:CheckProblematicCombinations(groupComp, dungeonData)
+    
+    -- Calculate overall group score
+    analysis.overallScore = self:CalculateGroupScore(analysis)
+    
+    return analysis
+end
+
+-- Generate smart recruitment suggestions
+function MatchCreator:GenerateRecruitmentSuggestions(groupAnalysis, dungeonData)
+    local suggestions = {
+        priority = {},
+        alternatives = {},
+        avoid = {}
+    }
+    
+    -- Determine what roles still need filling
+    local needTank = groupAnalysis.roles.tank.filled < groupAnalysis.roles.tank.needed
+    local needHealer = groupAnalysis.roles.healer.filled < groupAnalysis.roles.healer.needed  
+    local needDPS = groupAnalysis.roles.dps.filled < groupAnalysis.roles.dps.needed
+    
+    -- Priority suggestions based on critical gaps
+    for _, gap in ipairs(groupAnalysis.criticalGaps) do
+        if gap.type == "interrupt" then
+            if needDPS then
+                table.insert(suggestions.priority, {
+                    role = "DPS",
+                    specs = {"Hunter_Any", "Mage_Any", "Warrior_Any", "Shaman_Any"},
+                    reason = "Need DPS with interrupt capability"
+                })
+            end
+        elseif gap.type == "dispel" then
+            if needHealer then
+                table.insert(suggestions.priority, {
+                    role = "HEALER", 
+                    specs = {"Priest_Holy", "Shaman_Restoration", "Paladin_Holy"},
+                    reason = "Need healer with strong dispel"
+                })
+            elseif needDPS then
+                table.insert(suggestions.priority, {
+                    role = "DPS",
+                    specs = {"Priest_Shadow", "Mage_Any", "Shaman_Any"},
+                    reason = "Need DPS with dispel utility"
+                })
+            end
+        elseif gap.type == "enrageRemoval" then
+            if needDPS then
+                table.insert(suggestions.priority, {
+                    role = "DPS",
+                    specs = {"Hunter_Any", "Druid_Any"},
+                    reason = "CRITICAL: Need soothe/tranquilizing shot"
+                })
+            end
+        end
+    end
+    
+    -- Standard role filling if no critical gaps
+    if #suggestions.priority == 0 then
+        if needTank then
+            local topTanks = self:GetTopSpecsForRole("tank", dungeonData, 3)
+            table.insert(suggestions.priority, {
+                role = "TANK",
+                specs = topTanks,
+                reason = "Looking for optimal tank"
+            })
+        end
+        
+        if needHealer then
+            local topHealers = self:GetTopSpecsForRole("healer", dungeonData, 3)
+            table.insert(suggestions.priority, {
+                role = "HEALER", 
+                specs = topHealers,
+                reason = "Looking for optimal healer"
+            })
+        end
+        
+        if needDPS then
+            local topDPS = self:GetTopSpecsForRole("dps", dungeonData, 5)
+            table.insert(suggestions.priority, {
+                role = "DPS",
+                specs = topDPS,
+                reason = "Looking for high-performance DPS"
+            })
+        end
+    end
+    
+    return suggestions
+end
+
+-- Check for problematic group combinations
+function MatchCreator:CheckProblematicCombinations(groupComp, dungeonData)
+    local warnings = {}
+    
+    -- Check for lack of mobility in high-mobility dungeons
+    local mechanics = dungeonData.mechanics
+    if mechanics.mobility >= 85 then
+        local lowMobilitySpecs = {
+            ["Warlock_Any"] = true,
+            ["Priest_Holy"] = true, 
+            ["Priest_Discipline"] = true,
+            ["Paladin_Holy"] = true
+        }
+        
+        local lowMobilityCount = 0
+        local allSpecs = {}
+        
+        for _, specs in pairs(groupComp) do
+            if type(specs) == "table" then
+                for _, spec in ipairs(specs) do
+                    table.insert(allSpecs, spec)
+                    if lowMobilitySpecs[spec] then
+                        lowMobilityCount = lowMobilityCount + 1
+                    end
+                end
+            end
+        end
+        
+        if lowMobilityCount >= 2 then
+            table.insert(warnings, {
+                severity = "MEDIUM",
+                type = "MOBILITY",
+                message = "Multiple low-mobility specs in high-mobility dungeon",
+                suggestion = "Consider recruiting more mobile alternatives"
+            })
+        end
+    end
+    
+    -- Check for insufficient magic defense in magic-heavy dungeons
+    if mechanics.magicDefense >= 85 then
+        local magicVulnerableSpecs = {
+            ["Warrior_Protection"] = true,
+            ["Warrior_Any"] = true
+        }
+        
+        for _, spec in ipairs(groupComp.tanks) do
+            if magicVulnerableSpecs[spec] then
+                table.insert(warnings, {
+                    severity = "HIGH",
+                    type = "MAGIC_DEFENSE", 
+                    message = "Tank spec vulnerable to heavy magic damage",
+                    suggestion = "Ensure strong defensive cooldowns and support"
+                })
+            end
+        end
+    end
+    
+    -- Check for overlapping utility waste
+    if groupComp.utilities.enrageRemoval >= 3 then
+        table.insert(warnings, {
+            severity = "LOW",
+            type = "UTILITY_WASTE",
+            message = "Excessive enrage removal coverage",
+            suggestion = "Could optimize for other utilities"
+        })
+    end
+    
+    -- Check for dangerous affix combinations
+    local affixes = self:GetCurrentAffixes()
+    if affixes then
+        for _, affix in ipairs(affixes) do
+            local affixWarnings = self:CheckAffixCombinationWarnings(groupComp, affix, dungeonData)
+            for _, warning in ipairs(affixWarnings) do
+                table.insert(warnings, warning)
+            end
+        end
+    end
+    
+    return warnings
+end
+
+-- Check affix-specific combination warnings
+function MatchCreator:CheckAffixCombinationWarnings(groupComp, affix, dungeonData)
+    local warnings = {}
+    
+    if affix == "Bursting" then
+        -- Check for insufficient healing/health for bursting
+        local burstingVulnerable = {
+            ["Priest_Discipline"] = true -- Absorbs don't help with bursting
+        }
+        
+        for _, spec in ipairs(groupComp.healers) do
+            if burstingVulnerable[spec] then
+                table.insert(warnings, {
+                    severity = "MEDIUM",
+                    type = "AFFIX_SYNERGY",
+                    message = "Discipline Priest struggles with Bursting affix",
+                    suggestion = "Consider strong raw healing alternatives"
+                })
+            end
+        end
+        
+    elseif affix == "Raging" then
+        -- Critical warning if no enrage removal
+        if groupComp.utilities.enrageRemoval == 0 then
+            table.insert(warnings, {
+                severity = "CRITICAL", 
+                type = "AFFIX_REQUIREMENT",
+                message = "RAGING WEEK: No enrage removal in group!",
+                suggestion = "MUST recruit Hunter or Druid immediately"
+            })
+        end
+        
+    elseif affix == "Inspiring" then
+        -- Check for insufficient interrupt coverage
+        if groupComp.utilities.interrupt < 3 then
+            table.insert(warnings, {
+                severity = "HIGH",
+                type = "AFFIX_REQUIREMENT", 
+                message = "Inspiring week needs extra interrupt coverage",
+                suggestion = "Recruit specs with reliable interrupts"
+            })
+        end
+    end
+    
+    return warnings
+end
+
+-- Real-time applicant scoring and sorting
+function MatchCreator:ScoreAndRankApplicants(applicants)
+    if not applicants or #applicants == 0 then return {} end
+    
+    local scoredApplicants = {}
+    local currentDungeon = self:GetCurrentDungeon()
+    local groupAnalysis = self:AnalyzeCurrentGroupComposition()
+    
+    for _, applicant in ipairs(applicants) do
+        local analysis = self:AnalyzeApplicant(applicant)
+        if analysis then
+            -- Boost priority if fills critical gap
+            if groupAnalysis and groupAnalysis.criticalGaps then
+                for _, gap in ipairs(groupAnalysis.criticalGaps) do
+                    local utilities = self:GetSpecUtilities(analysis.class .. "_" .. analysis.spec, string.lower(analysis.role))
+                    
+                    if gap.type == "interrupt" and utilities and string.find(utilities, "Interrupt") then
+                        analysis.rating = analysis.rating + 15
+                        analysis.priority = analysis.priority + 2
+                    elseif gap.type == "dispel" and utilities and string.find(utilities, "Dispel") then
+                        analysis.rating = analysis.rating + 20 
+                        analysis.priority = analysis.priority + 3
+                    elseif gap.type == "enrageRemoval" and utilities and string.find(utilities, "Soothe") then
+                        analysis.rating = analysis.rating + 25
+                        analysis.priority = analysis.priority + 3
+                    end
+                end
+            end
+            
+            table.insert(scoredApplicants, analysis)
+        end
+    end
+    
+    -- Sort by priority, then rating, then item level
+    table.sort(scoredApplicants, function(a, b)
+        if a.priority ~= b.priority then
+            return a.priority > b.priority
+        elseif a.rating ~= b.rating then
+            return a.rating > b.rating
+        else
+            return a.itemLevel > b.itemLevel
+        end
+    end)
+    
+    return scoredApplicants
+end
+
+-- Smart suggestion notifications
+function MatchCreator:ShowSmartSuggestionNotification(suggestion)
+    if not MatchCreatorFrame then return end
+    
+    -- Create floating notification
+    local notification = CreateFrame("Frame", nil, MatchCreatorFrame)
+    notification:SetSize(300, 60)
+    notification:SetPoint("TOP", MatchCreatorFrame, "BOTTOM", 0, -10)
+    
+    local bg = notification:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    
+    -- Color based on suggestion type
+    if suggestion.type == "CRITICAL" then
+        bg:SetColorTexture(0.8, 0.2, 0.2, 0.9) -- Red
+    elseif suggestion.type == "HIGH" then
+        bg:SetColorTexture(0.9, 0.6, 0.2, 0.9) -- Orange
+    else
+        bg:SetColorTexture(0.2, 0.6, 0.9, 0.9) -- Blue
+    end
+    
+    local text = notification:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    text:SetPoint("CENTER", notification, "CENTER")
+    text:SetText(suggestion.message)
+    text:SetWidth(280)
+    text:SetJustifyH("CENTER")
+    
+    -- Auto-hide after delay
+    C_Timer.After(5, function()
+        if notification then
+            notification:Hide()
+        end
+    end)
+    
+    return notification
+end
+
+-- Integration with applicant list (hooks into Blizzard LFG system)
+function MatchCreator:HookIntoLFGApplicantSystem()
+    -- Hook LFG applicant updates
+    local originalUpdate = LFGListFrame.ApplicationViewer.ScrollBox.Update
+    if originalUpdate then
+        LFGListFrame.ApplicationViewer.ScrollBox.Update = function(...)
+            originalUpdate(...)
+            MatchCreator:OnApplicantListUpdate()
+        end
+    end
+    
+    -- Hook applicant selection
+    hooksecurefunc("LFGListApplicationViewer_UpdateApplicant", function(button, ...)
+        if button and button.applicantID then
+            MatchCreator:ProcessApplicantButton(button)
+        end
+    end)
+end
+
+-- Process applicant button with smart suggestions
+function MatchCreator:ProcessApplicantButton(button)
+    if not button or not button.applicantID then return end
+    
+    -- Get applicant info from button
+    local applicantInfo = C_LFGList.GetApplicantInfo(button.applicantID)
+    if not applicantInfo then return end
+    
+    -- Analyze this specific applicant
+    local analysis = self:AnalyzeApplicant({
+        applicantID = button.applicantID,
+        name = applicantInfo.name,
+        class = applicantInfo.classDisplayName,
+        spec = applicantInfo.specDisplayName, 
+        role = applicantInfo.role,
+        itemLevel = applicantInfo.itemLevel
+    })
+    
+    if analysis then
+        -- Add visual indicators to the button
+        self:AddApplicantRecommendationIndicator(button, analysis)
+    end
+end
+
+-- Add visual recommendation indicator to applicant buttons
+function MatchCreator:AddApplicantRecommendationIndicator(button, analysis)
+    if not button then return end
+    
+    -- Remove existing indicator
+    if button.mcIndicator then
+        button.mcIndicator:Hide()
+        button.mcIndicator = nil
+    end
+    
+    -- Create new indicator
+    local indicator = CreateFrame("Frame", nil, button)
+    indicator:SetSize(16, 16)
+    indicator:SetPoint("RIGHT", button, "RIGHT", -5, 0)
+    
+    local texture = indicator:CreateTexture(nil, "OVERLAY")
+    texture:SetAllPoints()
+    
+    -- Set texture and color based on recommendation
+    if analysis.recommendation == "EXCELLENT" then
+        texture:SetTexture("Interface\\RaidFrame\\ReadyCheck-Ready")
+    elseif analysis.recommendation == "GOOD" then
+        texture:SetTexture("Interface\\RaidFrame\\ReadyCheck-Ready") 
+        texture:SetVertexColor(1, 1, 0) -- Yellow tint
+    elseif analysis.recommendation == "ACCEPTABLE" then
+        texture:SetTexture("Interface\\RaidFrame\\ReadyCheck-Waiting")
+    elseif analysis.recommendation == "RISKY" then
+        texture:SetTexture("Interface\\RaidFrame\\ReadyCheck-NotReady")
+        texture:SetVertexColor(1, 0.6, 0) -- Orange tint
+    else -- AVOID
+        texture:SetTexture("Interface\\RaidFrame\\ReadyCheck-NotReady")
+    end
+    
+    -- Tooltip
+    indicator:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:SetText("Match Creator Analysis", 1, 1, 1)
+        GameTooltip:AddLine("Rating: " .. analysis.rating .. "% (" .. analysis.recommendation .. ")", 0.7, 0.7, 0.7)
+        
+        if #analysis.strengths > 0 then
+            GameTooltip:AddLine("Strengths:", 0, 1, 0)
+            for _, strength in ipairs(analysis.strengths) do
+                GameTooltip:AddLine("• " .. strength, 0.7, 1, 0.7)
+            end
+        end
+        
+        if #analysis.concerns > 0 then
+            GameTooltip:AddLine("Concerns:", 1, 0.5, 0)
+            for _, concern in ipairs(analysis.concerns) do
+                GameTooltip:AddLine("• " .. concern, 1, 0.7, 0.7)
+            end
+        end
+        
+        GameTooltip:Show()
+    end)
+    
+    indicator:SetScript("OnLeave", function(self)
+        GameTooltip:Hide()
+    end)
+    
+    button.mcIndicator = indicator
+end-- Enhanced boss encounter analysis
 function MatchCreator:GetBossAnalysis(dungeonName, bossName)
     local dungeonData = self.dungeonData[dungeonName]
     if not dungeonData or not dungeonData.bosses then
