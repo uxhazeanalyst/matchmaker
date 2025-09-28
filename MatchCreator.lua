@@ -1,4 +1,117 @@
--- Helper functions for smart suggestions
+-- Calculate guild statistics
+function MatchCreator:CalculateGuildStats()
+    local stats = {
+        total = 0,
+        tanks = 0,
+        healers = 0,
+        dps = 0,
+        online = 0,
+        byClass = {}
+    }
+    
+    for name, profile in pairs(self.guildPlanner.playerProfiles) do
+        stats.total = stats.total + 1
+        
+        if profile.isOnline then
+            stats.online = stats.online + 1
+        end
+        
+        -- Count by preferred roles
+        for _, role in ipairs(profile.mythicPlusData.preferredRoles) do
+            if role == "TANK" then
+                stats.tanks = stats.tanks + 1
+            elseif role == "HEALER" then
+                stats.healers = stats.healers + 1
+            elseif role == "DAMAGER" then
+                stats.dps = stats.dps + 1
+            end
+        end
+        
+        -- Count by class
+        stats.byClass[profile.class] = (stats.byClass[profile.class] or 0) + 1
+    end
+    
+    return stats
+end
+
+-- Create role distribution chart
+function MatchCreator:CreateRoleDistributionChart(parent, stats, yOffset)
+    local chartTitle = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    chartTitle:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, yOffset)
+    chartTitle:SetText("|cFFFFAA00Role Distribution:|r")
+    
+    yOffset = yOffset - 25
+    
+    -- Create visual bars for role distribution
+    local roles = {
+        {name = "Tanks", count = stats.tanks, color = {0.2, 0.6, 1, 0.8}},
+        {name = "Healers", count = stats.healers, color = {0.2, 1, 0.2, 0.8}},
+        {name = "DPS", count = stats.dps, color = {1, 0.3, 0.3, 0.8}}
+    }
+    
+    local maxCount = math.max(stats.tanks, stats.healers, stats.dps)
+    local maxBarWidth = 300
+    
+    for _, role in ipairs(roles) do
+        -- Role name
+        local roleName = parent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        roleName:SetPoint("TOPLEFT", parent, "TOPLEFT", 20, yOffset)
+        roleName:SetText(role.name .. ": " .. role.count)
+        
+        -- Bar background
+        local barBG = CreateFrame("Frame", nil, parent)
+        barBG:SetPoint("LEFT", roleName, "RIGHT", 20, 0)
+        barBG:SetSize(maxBarWidth, 16)
+        local bgTexture = barBG:CreateTexture(nil, "BACKGROUND")
+        bgTexture:SetAllPoints()
+        bgTexture:SetColorTexture(0.2, 0.2, 0.2, 0.6)
+        
+        -- Role bar
+        local barWidth = maxCount > 0 and (role.count / maxCount) * maxBarWidth or 0
+        local roleBar = CreateFrame("Frame", nil, parent)
+        roleBar:SetPoint("LEFT", barBG, "LEFT", 0, 0)
+        roleBar:SetSize(barWidth, 16)
+        local roleTexture = roleBar:CreateTexture(nil, "ARTWORK")
+        roleTexture:SetAllPoints()
+        roleTexture:SetColorTexture(unpack(role.color))
+        
+        yOffset = yOffset - 25
+    end
+end
+
+-- Create player card for roster display
+function MatchCreator:CreatePlayerCard(parent, profile, yOffset)
+    local card = CreateFrame("Frame", nil, parent)
+    card:SetPoint("TOPLEFT", parent, "TOPLEFT", 10, yOffset)
+    card:SetSize(720, 50)
+    
+    -- Background
+    local bg = card:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    local alpha = profile.isOnline and 0.3 or 0.15
+    bg:SetColorTexture(0.1, 0.1, 0.1, alpha)
+    
+    -- Online indicator
+    local onlineIndicator = card:CreateTexture(nil, "ARTWORK")
+    onlineIndicator:SetSize(12, 12)
+    onlineIndicator:SetPoint("LEFT", card, "LEFT", 5, 0)
+    if profile.isOnline then
+        onlineIndicator:SetColorTexture(0, 1, 0, 0.8) -- Green for online
+    else
+        onlineIndicator:SetColorTexture(0.5, 0.5, 0.5, 0.8) -- Gray for offline
+    end
+    
+    -- Player name and class
+    local nameText = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    nameText:SetPoint("LEFT", onlineIndicator, "RIGHT", 8, 8)
+    local classColors = RAID_CLASS_COLORS[profile.class] or {r = 1, g = 1, b = 1}
+    nameText:SetText(string.format("|cFF%02x%02x%02x%s|r", 
+        classColors.r * 255, classColors.g * 255, classColors.b * 255, profile.name))
+    
+    -- Preferred roles
+    local rolesText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    rolesText:SetPoint("LEFT", onlineIndicator, "RIGHT", 8, -8)
+    local roleStr = table.concat(profile.mythicPlusData.preferre-- Helper functions for smart suggestions
 function MatchCreator:GetTopSpecsForRole(role, dungeonData, count)
     if not dungeonData.preferredSpecs[role] then return {} end
     
@@ -499,74 +612,542 @@ function MatchCreator:StopSmartSuggestionsAutoRefresh()
     end
 end
 
--- Initialize smart suggestions system
-function MatchCreator:InitializeSmartSuggestions()
-    -- Hook into LFG system
-    self:HookIntoLFGApplicantSystem()
+-- Guild Composition Planner System
+MatchCreator.guildPlanner = {
+    rosters = {},
+    teams = {},
+    schedules = {},
+    playerProfiles = {},
+    templates = {}
+}
+
+-- Initialize Guild Planner data structures
+function MatchCreator:InitializeGuildPlanner()
+    self.guildPlanner = {
+        rosters = {},
+        teams = {},
+        schedules = {},
+        playerProfiles = {},
+        templates = {},
+        activeRoster = nil,
+        guildInfo = {
+            name = GetGuildInfo("player") or "Unknown Guild",
+            memberCount = 0,
+            lastUpdate = 0
+        }
+    }
     
-    -- Start monitoring when group is created
-    local smartFrame = CreateFrame("Frame")
-    smartFrame:RegisterEvent("LFG_LIST_ACTIVE_ENTRY_UPDATE")
-    smartFrame:RegisterEvent("GROUP_ROSTER_UPDATE")
+    -- Load saved data
+    self:LoadGuildPlannerData()
     
-    smartFrame:SetScript("OnEvent", function(self, event, ...)
-        if event == "LFG_LIST_ACTIVE_ENTRY_UPDATE" then
-            if C_LFGList.HasActiveEntryInfo() then
-                MatchCreator:StartApplicantMonitoring()
-                MatchCreator:StartSmartSuggestionsAutoRefresh()
-            else
-                MatchCreator:StopApplicantMonitoring()
-                MatchCreator:StopSmartSuggestionsAutoRefresh()
-            end
-        elseif event == "GROUP_ROSTER_UPDATE" then
-            -- Refresh analysis when group changes
-            if MatchCreatorFrame and MatchCreatorFrame.activeTab == 6 then
-                MatchCreator:RefreshTabContent(6)
-            end
+    -- Start guild roster monitoring
+    self:StartGuildRosterMonitoring()
+end
+
+-- Guild roster monitoring and analysis
+function MatchCreator:StartGuildRosterMonitoring()
+    local frame = CreateFrame("Frame")
+    frame:RegisterEvent("GUILD_ROSTER_UPDATE")
+    frame:RegisterEvent("GUILD_PARTY_STATE_RESPONSE")
+    
+    frame:SetScript("OnEvent", function(self, event, ...)
+        if event == "GUILD_ROSTER_UPDATE" then
+            MatchCreator:UpdateGuildRoster()
         end
     end)
+    
+    -- Initial roster scan
+    if IsInGuild() then
+        GuildRoster()
+    end
 end
 
--- Enhanced tab content refresh to include smart suggestions
-local originalRefreshTabContent = MatchCreator.RefreshTabContent
-function MatchCreator:RefreshTabContent(tabIndex)
-    if tabIndex == 6 then
-        -- Smart suggestions tab
-        local currentDungeon = self:GetCurrentDungeon()
-        if currentDungeon then
-            local recommendations = self:GetDungeonRecommendations(currentDungeon)
-            local affixes = self:GetCurrentAffixes()
-            
-            if affixes then
-                recommendations = self:GetAffixAdjustedRecommendations(currentDungeon, affixes)
-            end
-            
-            self:UpdateSmartSuggestionsTab(recommendations)
+-- Update guild roster with member analysis
+function MatchCreator:UpdateGuildRoster()
+    if not IsInGuild() then return end
+    
+    local numMembers = GetNumGuildMembers()
+    self.guildPlanner.guildInfo.memberCount = numMembers
+    self.guildPlanner.guildInfo.lastUpdate = time()
+    
+    -- Analyze each guild member
+    for i = 1, numMembers do
+        local name, rankName, rankIndex, level, classDisplayName, zone, 
+              publicNote, officerNote, isOnline, status, class = GetGuildRosterInfo(i)
+        
+        if name and level >= 70 then -- Only consider max level characters
+            local profile = self:CreatePlayerProfile(name, class, classDisplayName, level, 
+                                                   rankName, isOnline, publicNote, officerNote)
+            self.guildPlanner.playerProfiles[name] = profile
         end
-    else
-        -- Call original function for other tabs
-        originalRefreshTabContent(self, tabIndex)
     end
 end
 
--- Initialize minimap button and smart suggestions on load
-local function InitializeAddon()
-    if MatchCreator.minimapButton then return end
-    MatchCreator.minimapButton = MatchCreator:CreateMinimapButton()
-    MatchCreator:InitializeSmartSuggestions()
+-- Create comprehensive player profile
+function MatchCreator:CreatePlayerProfile(name, class, classDisplayName, level, rank, isOnline, publicNote, officerNote)
+    local profile = {
+        name = name,
+        class = class,
+        classDisplayName = classDisplayName,
+        level = level,
+        rank = rank,
+        isOnline = isOnline,
+        publicNote = publicNote,
+        officerNote = officerNote,
+        lastUpdated = time(),
+        
+        -- M+ specific data
+        mythicPlusData = {
+            preferredRoles = self:ParsePreferredRoles(publicNote, officerNote),
+            availableSpecs = self:GetAvailableSpecs(class),
+            experience = self:EstimateExperience(publicNote, officerNote),
+            schedule = self:ParseSchedule(publicNote, officerNote),
+            keyLevel = self:ExtractKeyLevel(publicNote, officerNote)
+        },
+        
+        -- Performance tracking
+        performance = {
+            reliability = 85, -- Default, will be updated based on participation
+            skillLevel = self:EstimateSkillLevel(publicNote, officerNote),
+            teamwork = 80, -- Default teamwork rating
+            participation = 0 -- Tracks participation in guild runs
+        },
+        
+        -- Availability
+        availability = {
+            weekdays = {true, true, true, true, true, false, false}, -- Mon-Fri available by default
+            timeZone = "Server",
+            preferredTimes = {"Evening"}, -- Morning, Afternoon, Evening, Night
+            blackoutDates = {}
+        }
+    }
+    
+    return profile
 end
 
--- Hook into addon loading
-local initFrame = CreateFrame("Frame")
-initFrame:RegisterEvent("ADDON_LOADED")
-initFrame:RegisterEvent("PLAYER_LOGIN")
-initFrame:SetScript("OnEvent", function(self, event, addonName)
-    if (event == "ADDON_LOADED" and addonName == "MatchCreator") or event == "PLAYER_LOGIN" then
-        InitializeAddon()
-        print("|cFF00FF00Match Creator|r loaded! Use /mc for commands or click the minimap button.")
-        print("|cFF88FF88Smart Suggestions:|r Real-time applicant analysis and group optimization active!")
+-- Parse preferred roles from guild notes
+function MatchCreator:ParsePreferredRoles(publicNote, officerNote)
+    local roles = {}
+    local notes = (publicNote or "") .. " " .. (officerNote or "")
+    notes = string.lower(notes)
+    
+    if string.find(notes, "tank") or string.find(notes, "prot") or string.find(notes, "guardian") or string.find(notes, "blood") or string.find(notes, "brew") or string.find(notes, "veng") then
+        table.insert(roles, "TANK")
     end
-end)-- Enhanced slash commands with UI controls
+    
+    if string.find(notes, "heal") or string.find(notes, "resto") or string.find(notes, "holy") or string.find(notes, "disc") or string.find(notes, "mw") or string.find(notes, "pres") then
+        table.insert(roles, "HEALER")
+    end
+    
+    if string.find(notes, "dps") or string.find(notes, "damage") or string.find(notes, "dd") then
+        table.insert(roles, "DAMAGER")
+    end
+    
+    -- If no specific roles found, assume DPS
+    if #roles == 0 then
+        table.insert(roles, "DAMAGER")
+    end
+    
+    return roles
+end
+
+-- Get all available specs for a class
+function MatchCreator:GetAvailableSpecs(class)
+    local classSpecs = {
+        ["WARRIOR"] = {
+            {name = "Arms", role = "DAMAGER"},
+            {name = "Fury", role = "DAMAGER"},
+            {name = "Protection", role = "TANK"}
+        },
+        ["PALADIN"] = {
+            {name = "Holy", role = "HEALER"},
+            {name = "Protection", role = "TANK"},
+            {name = "Retribution", role = "DAMAGER"}
+        },
+        ["HUNTER"] = {
+            {name = "Beast Mastery", role = "DAMAGER"},
+            {name = "Marksmanship", role = "DAMAGER"},
+            {name = "Survival", role = "DAMAGER"}
+        },
+        ["ROGUE"] = {
+            {name = "Assassination", role = "DAMAGER"},
+            {name = "Outlaw", role = "DAMAGER"},
+            {name = "Subtlety", role = "DAMAGER"}
+        },
+        ["PRIEST"] = {
+            {name = "Discipline", role = "HEALER"},
+            {name = "Holy", role = "HEALER"},
+            {name = "Shadow", role = "DAMAGER"}
+        },
+        ["DEATHKNIGHT"] = {
+            {name = "Blood", role = "TANK"},
+            {name = "Frost", role = "DAMAGER"},
+            {name = "Unholy", role = "DAMAGER"}
+        },
+        ["SHAMAN"] = {
+            {name = "Elemental", role = "DAMAGER"},
+            {name = "Enhancement", role = "DAMAGER"},
+            {name = "Restoration", role = "HEALER"}
+        },
+        ["MAGE"] = {
+            {name = "Arcane", role = "DAMAGER"},
+            {name = "Fire", role = "DAMAGER"},
+            {name = "Frost", role = "DAMAGER"}
+        },
+        ["WARLOCK"] = {
+            {name = "Affliction", role = "DAMAGER"},
+            {name = "Demonology", role = "DAMAGER"},
+            {name = "Destruction", role = "DAMAGER"}
+        },
+        ["MONK"] = {
+            {name = "Brewmaster", role = "TANK"},
+            {name = "Mistweaver", role = "HEALER"},
+            {name = "Windwalker", role = "DAMAGER"}
+        },
+        ["DRUID"] = {
+            {name = "Balance", role = "DAMAGER"},
+            {name = "Feral", role = "DAMAGER"},
+            {name = "Guardian", role = "TANK"},
+            {name = "Restoration", role = "HEALER"}
+        },
+        ["DEMONHUNTER"] = {
+            {name = "Havoc", role = "DAMAGER"},
+            {name = "Vengeance", role = "TANK"}
+        },
+        ["EVOKER"] = {
+            {name = "Devastation", role = "DAMAGER"},
+            {name = "Preservation", role = "HEALER"}
+        }
+    }
+    
+    return classSpecs[class] or {}
+end
+
+-- Team composition optimizer
+function MatchCreator:OptimizeTeamComposition(dungeonName, availablePlayers, requirements)
+    local compositions = {}
+    
+    -- Get dungeon requirements
+    local dungeonData = self.dungeonData[dungeonName]
+    if not dungeonData then
+        return {}, "Dungeon data not found"
+    end
+    
+    -- Filter players by role availability
+    local tanks = {}
+    local healers = {}
+    local dps = {}
+    
+    for playerName, profile in pairs(availablePlayers) do
+        for _, role in ipairs(profile.mythicPlusData.preferredRoles) do
+            if role == "TANK" then
+                table.insert(tanks, {player = profile, specs = self:GetPlayerSpecsForRole(profile, "tank")})
+            elseif role == "HEALER" then
+                table.insert(healers, {player = profile, specs = self:GetPlayerSpecsForRole(profile, "healer")})
+            elseif role == "DAMAGER" then
+                table.insert(dps, {player = profile, specs = self:GetPlayerSpecsForRole(profile, "dps")})
+            end
+        end
+    end
+    
+    -- Generate optimal compositions
+    for _, tank in ipairs(tanks) do
+        for _, healer in ipairs(healers) do
+            -- Need to select 3 DPS from available pool
+            local dpsCompositions = self:GenerateDPSCombinations(dps, 3)
+            
+            for _, dpsGroup in ipairs(dpsCompositions) do
+                local composition = {
+                    tank = tank,
+                    healer = healer,
+                    dps = dpsGroup,
+                    score = 0,
+                    utilities = {interrupt = 0, dispel = 0, enrageRemoval = 0, mobility = 0},
+                    warnings = {},
+                    strengths = {}
+                }
+                
+                -- Calculate composition score
+                composition.score = self:CalculateCompositionScore(composition, dungeonData)
+                composition.utilities = self:CalculateCompositionUtilities(composition)
+                composition.warnings = self:AnalyzeCompositionWarnings(composition, dungeonData)
+                composition.strengths = self:AnalyzeCompositionStrengths(composition, dungeonData)
+                
+                table.insert(compositions, composition)
+            end
+        end
+    end
+    
+    -- Sort by score
+    table.sort(compositions, function(a, b) return a.score > b.score end)
+    
+    return compositions
+end
+
+-- Generate DPS combinations
+function MatchCreator:GenerateDPSCombinations(dpsPool, needed)
+    local combinations = {}
+    
+    -- Simple combination generation for now (can be optimized)
+    if #dpsPool < needed then
+        return combinations
+    end
+    
+    -- Generate all possible combinations of 'needed' DPS from pool
+    local function generateCombos(pool, combo, start, remaining)
+        if remaining == 0 then
+            table.insert(combinations, {unpack(combo)})
+            return
+        end
+        
+        for i = start, #pool - remaining + 1 do
+            table.insert(combo, pool[i])
+            generateCombos(pool, combo, i + 1, remaining - 1)
+            table.remove(combo)
+        end
+    end
+    
+    generateCombos(dpsPool, {}, 1, needed)
+    return combinations
+end
+
+-- Calculate composition score for guild teams
+function MatchCreator:CalculateCompositionScore(composition, dungeonData)
+    local score = 0
+    local baseScore = 70
+    
+    -- Tank score
+    local tankSpecs = composition.tank.specs
+    if tankSpecs and #tankSpecs > 0 then
+        local bestTankScore = 0
+        for _, spec in ipairs(tankSpecs) do
+            local specKey = composition.tank.player.class .. "_" .. spec.name
+            local specScore = dungeonData.preferredSpecs.tank[specKey] or 60
+            bestTankScore = math.max(bestTankScore, specScore)
+        end
+        score = score + (bestTankScore * 0.25)
+    end
+    
+    -- Healer score
+    local healerSpecs = composition.healer.specs
+    if healerSpecs and #healerSpecs > 0 then
+        local bestHealerScore = 0
+        for _, spec in ipairs(healerSpecs) do
+            local specKey = composition.healer.player.class .. "_" .. spec.name
+            local specScore = dungeonData.preferredSpecs.healer[specKey] or 60
+            bestHealerScore = math.max(bestHealerScore, specScore)
+        end
+        score = score + (bestHealerScore * 0.25)
+    end
+    
+    -- DPS scores
+    local totalDPSScore = 0
+    for _, dpsPlayer in ipairs(composition.dps) do
+        local bestDPSScore = 0
+        for _, spec in ipairs(dpsPlayer.specs) do
+            local specKey = dpsPlayer.player.class .. "_" .. spec.name
+            local specScore = dungeonData.preferredSpecs.dps[specKey] or 60
+            bestDPSScore = math.max(bestDPSScore, specScore)
+        end
+        totalDPSScore = totalDPSScore + bestDPSScore
+    end
+    score = score + ((totalDPSScore / 3) * 0.4) -- Average DPS score
+    
+    -- Team synergy bonuses
+    score = score + self:CalculateTeamSynergy(composition) * 0.1
+    
+    return math.min(100, score)
+end
+
+-- Calculate team synergy bonuses
+function MatchCreator:CalculateTeamSynergy(composition)
+    local synergy = 0
+    
+    -- Check for good player combinations (friends, regular teammates)
+    -- This would be enhanced with historical data
+    
+    -- Utility coverage bonus
+    local utilities = self:CalculateCompositionUtilities(composition)
+    if utilities.interrupt >= 3 then synergy = synergy + 5 end
+    if utilities.dispel >= 2 then synergy = synergy + 5 end
+    if utilities.enrageRemoval >= 1 then synergy = synergy + 5 end
+    
+    -- Class diversity bonus
+    local classes = {}
+    classes[composition.tank.player.class] = true
+    classes[composition.healer.player.class] = true
+    for _, dpsPlayer in ipairs(composition.dps) do
+        classes[dpsPlayer.player.class] = true
+    end
+    
+    local uniqueClasses = 0
+    for _ in pairs(classes) do
+        uniqueClasses = uniqueClasses + 1
+    end
+    
+    if uniqueClasses >= 4 then synergy = synergy + 10 end
+    
+    return synergy
+end
+
+-- Guild team management UI
+function MatchCreator:ShowGuildPlannerFrame()
+    if MatchCreatorGuildFrame then
+        MatchCreatorGuildFrame:Show()
+        self:RefreshGuildPlannerFrame()
+        return
+    end
+    
+    -- Create main guild planner frame
+    local frame = CreateFrame("Frame", "MatchCreatorGuildFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame:SetSize(800, 600)
+    frame:SetPoint("CENTER", 0, 0)
+    frame.title = frame:CreateFontString(nil, "OVERLAY")
+    frame.title:SetFontObject("GameFontHighlight")
+    frame.title:SetPoint("LEFT", frame.TitleBg, "LEFT", 5, 0)
+    frame.title:SetText("Match Creator - Guild Composition Planner")
+    
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    
+    -- Create tab system for guild planner
+    frame.guildTabs = {}
+    frame.guildTabContents = {}
+    frame.activeGuildTab = 1
+    
+    local guildTabNames = {"Roster", "Teams", "Optimizer", "Schedule", "Templates"}
+    local tabWidth = 150
+    
+    for i, tabName in ipairs(guildTabNames) do
+        local tab = CreateFrame("Button", "MatchCreatorGuildTab"..i, frame, "TabButtonTemplate")
+        tab:SetSize(tabWidth, 32)
+        tab:SetPoint("TOPLEFT", frame, "BOTTOMLEFT", (i-1) * tabWidth, 2)
+        tab:SetText(tabName)
+        tab.tabIndex = i
+        
+        tab:SetScript("OnClick", function(self)
+            MatchCreator:SelectGuildTab(self.tabIndex)
+        end)
+        
+        frame.guildTabs[i] = tab
+        
+        -- Create content frame for each tab
+        local content = CreateFrame("ScrollFrame", "MatchCreatorGuildContent"..i, frame, "UIPanelScrollFrameTemplate")
+        content:SetPoint("TOPLEFT", frame.Inset, "TOPLEFT", 4, -4)
+        content:SetPoint("BOTTOMRIGHT", frame.Inset, "BOTTOMRIGHT", -24, 4)
+        
+        local contentChild = CreateFrame("Frame", nil, content)
+        contentChild:SetSize(750, 540)
+        content:SetScrollChild(contentChild)
+        content:Hide()
+        
+        frame.guildTabContents[i] = {frame = content, child = contentChild, elements = {}}
+    end
+    
+    -- Show first tab by default
+    frame.guildTabContents[1].frame:Show()
+    PanelTemplates_SelectTab(frame.guildTabs[1])
+    
+    frame:Show()
+    self:RefreshGuildPlannerFrame()
+end
+
+-- Guild tab selection
+function MatchCreator:SelectGuildTab(tabIndex)
+    local frame = MatchCreatorGuildFrame
+    if not frame then return end
+    
+    -- Hide all tab contents
+    for i, content in ipairs(frame.guildTabContents) do
+        content.frame:Hide()
+        PanelTemplates_DeselectTab(frame.guildTabs[i])
+    end
+    
+    -- Show selected tab
+    frame.guildTabContents[tabIndex].frame:Show()
+    PanelTemplates_SelectTab(frame.guildTabs[tabIndex])
+    frame.activeGuildTab = tabIndex
+    
+    -- Refresh content for the selected tab
+    self:RefreshGuildTabContent(tabIndex)
+end
+
+-- Refresh guild tab content
+function MatchCreator:RefreshGuildTabContent(tabIndex)
+    if tabIndex == 1 then
+        self:UpdateGuildRosterTab()
+    elseif tabIndex == 2 then
+        self:UpdateGuildTeamsTab()
+    elseif tabIndex == 3 then
+        self:UpdateGuildOptimizerTab()
+    elseif tabIndex == 4 then
+        self:UpdateGuildScheduleTab()
+    elseif tabIndex == 5 then
+        self:UpdateGuildTemplatesTab()
+    end
+end
+
+-- Update guild roster tab
+function MatchCreator:UpdateGuildRosterTab()
+    local content = MatchCreatorGuildFrame.guildTabContents[1]
+    self:ClearGuildTabContent(1)
+    
+    local yOffset = -10
+    
+    -- Guild info header
+    local guildInfo = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    guildInfo:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    guildInfo:SetText("|cFFFFD700" .. self.guildPlanner.guildInfo.name .. "|r - M+ Roster Analysis")
+    table.insert(content.elements, guildInfo)
+    yOffset = yOffset - 30
+    
+    -- Statistics
+    local stats = self:CalculateGuildStats()
+    local statsText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    statsText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    statsText:SetText(string.format("Total Members: %d | Tanks: %d | Healers: %d | DPS: %d | Online: %d", 
+        stats.total, stats.tanks, stats.healers, stats.dps, stats.online))
+    table.insert(content.elements, statsText)
+    yOffset = yOffset - 25
+    
+    -- Role distribution visualization
+    self:CreateRoleDistributionChart(content.child, stats, yOffset)
+    yOffset = yOffset - 120
+    
+    -- Player list with role analysis
+    local playerList = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    playerList:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    playerList:SetText("|cFF00FF00Guild Members - M+ Analysis:|r")
+    table.insert(content.elements, playerList)
+    yOffset = yOffset - 25
+    
+    -- Sort players by role preference and skill
+    local sortedPlayers = {}
+    for name, profile in pairs(self.guildPlanner.playerProfiles) do
+        table.insert(sortedPlayers, profile)
+    end
+    
+    table.sort(sortedPlayers, function(a, b)
+        if #a.mythicPlusData.preferredRoles ~= #b.mythicPlusData.preferredRoles then
+            return #a.mythicPlusData.preferredRoles < #b.mythicPlusData.preferredRoles -- Specialists first
+        end
+        return a.performance.skillLevel > b.performance.skillLevel
+    end)
+    
+    -- Display player cards
+    for _, profile in ipairs(sortedPlayers) do
+        local card = self:CreatePlayerCard(content.child, profile, yOffset)
+        table.insert(content.elements, card)
+        yOffset = yOffset - 60
+        
+        if yOffset < -500 then
+            content.child:SetHeight(-yOffset + 50)
+        end
+    end
+end-- Enhanced slash commands with UI controls
 SLASH_MATCHCREATOR1 = "/matchcreator"
 SLASH_MATCHCREATOR2 = "/mc"
 SlashCmdList["MATCHCREATOR"] = function(msg)
