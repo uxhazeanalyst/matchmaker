@@ -1,23 +1,14 @@
-chat commands:
+# Basic
+/mc, /mc show, /mc hide, /mc toggle, /mc reset
 
-/mc help        # Show all commands
+# Testing  
+/mc test, /mc list, /mc analyze
 
-PHASE 1 COMMANDS:
+# Phase 1
+/mc bosses, /mc affixes, /mc utilities
 
-/mc              # Show main UI
+# Phase 2
+/mc smart, /mc monitor, /mc gaps, /mc score
 
-/mc bosses       # Boss strategies
-
-/mc affixes      # Current week affixes
-
-/mc utilities    # Check spec utilities
-
-PHASE 2 COMMANDS (NEW):
-
-/mc smart        # Smart analysis UI
-
-/mc monitor      # Toggle monitoring
-
-/mc gaps         # Show critical gaps
-
-/mc score        # Show group score
+# Utility
+/mc minimap, /mc help
