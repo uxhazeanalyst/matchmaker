@@ -1,25 +1,15 @@
 chat commands:
 
-/mc show       - Show window
+/mc help        # Show all commands
 
-/mc toggle     - Toggle visibility  
+PHASE 1 COMMANDS:
+/mc              # Show main UI
+/mc bosses       # Boss strategies
+/mc affixes      # Current week affixes
+/mc utilities    # Check spec utilities
 
-/mc tab [1-5]  - Jump to specific tab
-
-/mc test [dungeon] - Test specific dungeon
-
-/mc analyze [dungeon] - Quick CLI analysis
-
-/mc list       - Show all available dungeons
-
-/mc 3d              # Full 3D visualizer
-
-/mc synergy         # 3D group synergy view
-
-/mc heatmap2d       # 2D performance heat map
-
-/mc timeline2d      # 2D timeline predictions  
-
-/mc visual          # Show all visualization options
-
-/mc performance     # Quick performance analysis
+PHASE 2 COMMANDS (NEW):
+/mc smart        # Smart analysis UI
+/mc monitor      # Toggle monitoring
+/mc gaps         # Show critical gaps
+/mc score        # Show group score
