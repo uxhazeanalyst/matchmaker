@@ -2547,11 +2547,20 @@ function MatchCreator:CountDungeons()
     return count
 end
 
+-- Count dungeons for confirmation
+function MatchCreator:CountDungeons()
+    local count = 0
+    for _ in pairs(self.dungeonData or {}) do
+        count = count + 1
+    end
+    return count
+end
+
 -- Get current dungeon (placeholder)
 function MatchCreator:GetCurrentDungeon()
     -- Try to get from instance info first
     local name = GetInstanceInfo()
-    if name and self.dungeonData[name] then
+    if name and self.dungeonData and self.dungeonData[name] then
         return name
     end
     
@@ -2730,7 +2739,7 @@ function MatchCreator:PopulateRecommendations(parent, dungeonName, recommendatio
     end
 end
 
--- Analyze current group (simplified)
+-- Analyze current group (enhanced with safety checks)
 function MatchCreator:AnalyzeCurrentGroup()
     if not IsInGroup() then
         return nil
@@ -2742,28 +2751,67 @@ function MatchCreator:AnalyzeCurrentGroup()
         dps = {}
     }
     
-    -- Analyze group members (simplified)
+    -- Analyze group members
     local numMembers = GetNumGroupMembers()
+    local isRaid = IsInRaid()
+    
     for i = 1, numMembers do
-        local unit = (numMembers <= 5) and ("party" .. i) or ("raid" .. i)
+        local unit
+        if isRaid then
+            unit = "raid" .. i
+        else
+            if i == 1 then
+                unit = "player"
+            else
+                unit = "party" .. (i - 1)
+            end
+        end
+        
         if UnitExists(unit) then
             local name = UnitName(unit)
             local _, class = UnitClass(unit)
             
             if name and class then
-                -- Simple role assignment based on class (placeholder)
-                if class == "WARRIOR" or class == "PALADIN" or class == "DEATHKNIGHT" then
-                    table.insert(group.tanks, {name = name, class = class})
-                elseif class == "PRIEST" or class == "SHAMAN" or class == "DRUID" then
-                    table.insert(group.healers, {name = name, class = class})
+                -- Try to get role from spec (if inspected)
+                local role = UnitGroupRolesAssigned(unit)
+                
+                -- Fallback to class-based assignment
+                if not role or role == "NONE" then
+                    if class == "WARRIOR" or class == "PALADIN" or class == "DEATHKNIGHT" or 
+                       class == "DEMONHUNTER" or class == "MONK" or class == "DRUID" then
+                        role = "TANK"
+                    elseif class == "PRIEST" or class == "SHAMAN" or class == "DRUID" or 
+                           class == "PALADIN" or class == "MONK" or class == "EVOKER" then
+                        role = "HEALER"
+                    else
+                        role = "DAMAGER"
+                    end
+                end
+                
+                local memberData = {
+                    name = name,
+                    class = class,
+                    spec = "Unknown",
+                    role = role
+                }
+                
+                if role == "TANK" then
+                    table.insert(group.tanks, memberData)
+                elseif role == "HEALER" then
+                    table.insert(group.healers, memberData)
                 else
-                    table.insert(group.dps, {name = name, class = class})
+                    table.insert(group.dps, memberData)
                 end
             end
         end
     end
     
     return group
+end
+
+-- Safe version of AnalyzeCurrentGroupDetailed (for Phase 2)
+function MatchCreator:AnalyzeCurrentGroupDetailed()
+    return self:AnalyzeCurrentGroup()
 end
 
 -- Create minimap button
@@ -2910,7 +2958,7 @@ SlashCmdList["MATCHCREATOR"] = function(msg)
         MatchCreator:ShowSmartSuggestionsUI()
         
     elseif cmd == "monitor" then
-        if MatchCreator.smartSuggestions.monitoring then
+        if MatchCreator.smartSuggestions and MatchCreator.smartSuggestions.monitoring then
             MatchCreator:StopGroupMonitoring()
             print("|cFF88FF88Smart Monitor:|r Stopped")
         else
@@ -2919,7 +2967,7 @@ SlashCmdList["MATCHCREATOR"] = function(msg)
         end
         
     elseif cmd == "gaps" then
-        if MatchCreator.smartSuggestions.currentGroup then
+        if MatchCreator.smartSuggestions and MatchCreator.smartSuggestions.currentGroup then
             local groupData = MatchCreator.smartSuggestions.currentGroup
             print("|cFF00FF00Critical Gaps Analysis:|r")
             
@@ -2932,11 +2980,11 @@ SlashCmdList["MATCHCREATOR"] = function(msg)
                 print("|cFF00FF00No critical gaps detected!|r")
             end
         else
-            print("|cFFFF0000Error:|r No group analysis available")
+            print("|cFFFF0000Error:|r No group analysis available. Use /mc monitor to start")
         end
         
     elseif cmd == "score" then
-        if MatchCreator.smartSuggestions.currentGroup then
+        if MatchCreator.smartSuggestions and MatchCreator.smartSuggestions.currentGroup then
             local groupData = MatchCreator.smartSuggestions.currentGroup
             local scoreColor = groupData.groupScore >= 80 and "|cFF00FF00" or
                               groupData.groupScore >= 60 and "|cFFFFAA00" or "|cFFFF4444"
@@ -2946,12 +2994,42 @@ SlashCmdList["MATCHCREATOR"] = function(msg)
             print("Dispels: " .. groupData.utilities.dispel)
             print("Enrage Removal: " .. groupData.utilities.enrageRemoval)
         else
-            print("|cFFFF0000Error:|r No group analysis available")
+            print("|cFFFF0000Error:|r No group analysis available. Use /mc monitor to start")
         end
         
+    elseif cmd == "help" then
+        print("|cFF00FF00=== Match Creator Commands ===|r")
+        print(" ")
+        print("|cFFFFD700Basic Commands:|r")
+        print("/mc or /mc show - Show main UI")
+        print("/mc hide - Hide main UI")
+        print("/mc toggle - Toggle UI visibility")
+        print("/mc test [dungeon] - Test dungeon analysis")
+        print("/mc list - List available dungeons")
+        print(" ")
+        print("|cFFFFD700Phase 1 Features:|r")
+        print("/mc bosses [dungeon] - Show boss strategies")
+        print("/mc affixes - Show current week affixes")
+        print("/mc utilities <Class>_<Spec> - Check spec utilities")
+        print(" ")
+        print("|cFFFFD700Phase 2 Features:|r")
+        print("/mc smart - Show smart analysis UI")
+        print("/mc monitor - Toggle group monitoring")
+        print("/mc gaps - Show critical gaps")
+        print("/mc score - Show group composition score")
+        print(" ")
+        print("|cFFFFD700Other:|r")
+        print("/mc minimap - Toggle minimap button")
+        print("/mc reset - Reset UI")
+        
     else
-        -- Call previous handler
-        phase2SlashHandler(msg)
+        -- Call previous handler if it exists
+        if phase2SlashHandler then
+            phase2SlashHandler(msg)
+        else
+            print("|cFFFF0000Unknown command:|r " .. cmd)
+            print("Type |cFFFFFF00/mc help|r for available commands")
+        end
     end
 end
 
