@@ -283,7 +283,249 @@ function MatchCreator:UpdateRoleTab(role, recommendations, dungeonName)
         local noData = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
         noData:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
         noData:SetText("No data available for this role")
-        table.insert(content-- Match Creator Addon - Clean Working Version
+        table.insert(content.elements, noData)
+        return
+    end
+    
+    -- Sort specs by rating
+    local sortedSpecs = {}
+    for spec, rating in pairs(recommendations.preferredSpecs[role]) do
+        table.insert(sortedSpecs, {spec = spec, rating = rating})
+    end
+    table.sort(sortedSpecs, function(a, b) return a.rating > b.rating end)
+    
+    -- Create spec cards
+    for i, spec in ipairs(sortedSpecs) do
+        local card = self:CreateSpecCard(content, spec, yOffset)
+        yOffset = yOffset - 70
+        
+        if yOffset < -400 then
+            content.child:SetHeight(-yOffset + 50)
+        end
+    end
+end
+
+-- Create spec recommendation card
+function MatchCreator:CreateSpecCard(content, spec, yOffset)
+    local cardHeight = 60
+    
+    -- Card background
+    local card = CreateFrame("Frame", nil, content.child)
+    card:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    card:SetSize(520, cardHeight)
+    
+    local cardBG = card:CreateTexture(nil, "BACKGROUND")
+    cardBG:SetAllPoints()
+    cardBG:SetColorTexture(0.1, 0.1, 0.1, 0.8)
+    
+    -- Rating indicator on left side
+    local ratingBG = CreateFrame("Frame", nil, card)
+    ratingBG:SetPoint("LEFT", card, "LEFT", 0, 0)
+    ratingBG:SetSize(60, cardHeight)
+    
+    local ratingTexture = ratingBG:CreateTexture(nil, "ARTWORK")
+    ratingTexture:SetAllPoints()
+    
+    -- Color by rating
+    if spec.rating >= 90 then
+        ratingTexture:SetColorTexture(0, 0.8, 0, 0.6) -- Green for excellent
+    elseif spec.rating >= 80 then
+        ratingTexture:SetColorTexture(1, 0.8, 0, 0.6) -- Gold for very good
+    elseif spec.rating >= 70 then
+        ratingTexture:SetColorTexture(1, 0.6, 0, 0.6) -- Orange for good
+    else
+        ratingTexture:SetColorTexture(0.6, 0.6, 0.6, 0.6) -- Gray for average
+    end
+    
+    -- Rating number
+    local ratingText = card:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    ratingText:SetPoint("CENTER", ratingBG, "CENTER", 0, 0)
+    ratingText:SetText(spec.rating)
+    
+    -- Spec name
+    local specName = card:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    specName:SetPoint("LEFT", ratingBG, "RIGHT", 10, 15)
+    local formattedSpec = string.gsub(spec.spec, "_", " ")
+    specName:SetText("|cFFFFFFFF" .. formattedSpec .. "|r")
+    
+    -- Performance description
+    local perfDesc = card:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    perfDesc:SetPoint("LEFT", ratingBG, "RIGHT", 10, -5)
+    perfDesc:SetWidth(430)
+    perfDesc:SetJustifyH("LEFT")
+    
+    local description = self:GetPerformanceDescription(spec.rating)
+    perfDesc:SetText("|cFF888888" .. description .. "|r")
+    
+    table.insert(content.elements, card)
+    return card
+end
+
+-- Get performance description
+function MatchCreator:GetPerformanceDescription(rating)
+    if rating >= 95 then
+        return "Exceptional - Perfect for this content"
+    elseif rating >= 90 then
+        return "Excellent - Highly recommended choice"
+    elseif rating >= 80 then
+        return "Very Good - Strong performance expected"
+    elseif rating >= 70 then
+        return "Good - Solid choice for this dungeon"
+    elseif rating >= 60 then
+        return "Average - Can handle the content"
+    else
+        return "Below Average - Consider alternatives"
+    end
+end
+
+-- Update mechanics analysis tab
+function MatchCreator:UpdateMechanicsTab(recommendations, dungeonName)
+    local content = MatchCreatorFrame.tabContents[5]
+    self:ClearTabContent(5)
+    
+    local yOffset = -10
+    
+    -- Mechanics title
+    local mechTitle = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    mechTitle:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    mechTitle:SetText("|cFFFFD700Detailed Mechanics Analysis|r")
+    table.insert(content.elements, mechTitle)
+    yOffset = yOffset - 25
+    
+    -- Dungeon context
+    local contextText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    contextText:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+    contextText:SetText("For: " .. dungeonName)
+    table.insert(content.elements, contextText)
+    yOffset = yOffset - 30
+    
+    -- Create comprehensive mechanics breakdown
+    self:CreateDetailedMechanicsDisplay(content, recommendations.mechanics, yOffset)
+end
+
+-- Create detailed mechanics display
+function MatchCreator:CreateDetailedMechanicsDisplay(content, mechanics, yOffset)
+    -- Sort all mechanics by value
+    local sortedMechanics = {}
+    for mechanic, value in pairs(mechanics) do
+        if value > 0 then
+            table.insert(sortedMechanics, {name = mechanic, value = value})
+        end
+    end
+    table.sort(sortedMechanics, function(a, b) return a.value > b.value end)
+    
+    local maxBarWidth = 400
+    
+    for i, mech in ipairs(sortedMechanics) do
+        -- Mechanic card
+        local mechCard = CreateFrame("Frame", nil, content.child)
+        mechCard:SetPoint("TOPLEFT", content.child, "TOPLEFT", 10, yOffset)
+        mechCard:SetSize(530, 35)
+        
+        local cardBG = mechCard:CreateTexture(nil, "BACKGROUND")
+        cardBG:SetAllPoints()
+        cardBG:SetColorTexture(0.1, 0.1, 0.1, 0.6)
+        
+        -- Mechanic name
+        local mechName = mechCard:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        mechName:SetPoint("LEFT", mechCard, "LEFT", 10, 8)
+        mechName:SetText(self:FormatMechanicName(mech.name))
+        
+        -- Importance bar
+        local barBG = CreateFrame("Frame", nil, mechCard)
+        barBG:SetPoint("LEFT", mechCard, "LEFT", 10, -8)
+        barBG:SetSize(maxBarWidth, 8)
+        local bgTex = barBG:CreateTexture(nil, "BACKGROUND")
+        bgTex:SetAllPoints()
+        bgTex:SetColorTexture(0.3, 0.3, 0.3, 0.8)
+        
+        local barWidth = (mech.value / 100) * maxBarWidth
+        local bar = CreateFrame("Frame", nil, mechCard)
+        bar:SetPoint("LEFT", barBG, "LEFT", 0, 0)
+        bar:SetSize(barWidth, 8)
+        
+        local barTex = bar:CreateTexture(nil, "ARTWORK")
+        barTex:SetAllPoints()
+        
+        -- Color gradient based on importance
+        if mech.value >= 90 then
+            barTex:SetColorTexture(1, 0.2, 0.2, 0.9) -- Red for critical
+        elseif mech.value >= 80 then
+            barTex:SetColorTexture(1, 0.6, 0, 0.9) -- Orange for high
+        elseif mech.value >= 70 then
+            barTex:SetColorTexture(1, 1, 0, 0.9) -- Yellow for moderate
+        elseif mech.value >= 60 then
+            barTex:SetColorTexture(0.6, 1, 0.2, 0.9) -- Yellow-green for useful
+        else
+            barTex:SetColorTexture(0.4, 0.8, 1, 0.9) -- Blue for minor
+        end
+        
+        -- Value text with description
+        local valueText = mechCard:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        valueText:SetPoint("RIGHT", mechCard, "RIGHT", -10, 0)
+        
+        local importanceLevel = ""
+        if mech.value >= 90 then
+            importanceLevel = "CRITICAL"
+        elseif mech.value >= 80 then
+            importanceLevel = "High"
+        elseif mech.value >= 70 then
+            importanceLevel = "Moderate"
+        elseif mech.value >= 60 then
+            importanceLevel = "Useful"
+        else
+            importanceLevel = "Minor"
+        end
+        
+        valueText:SetText(mech.value .. "% - " .. importanceLevel)
+        
+        table.insert(content.elements, mechCard)
+        yOffset = yOffset - 40
+        
+        if yOffset < -400 then
+            content.child:SetHeight(-yOffset + 50)
+        end
+    end
+end
+
+-- Clear tab content helper
+function MatchCreator:ClearTabContent(tabIndex)
+    local content = MatchCreatorFrame.tabContents[tabIndex]
+    if content.elements then
+        for _, element in pairs(content.elements) do
+            if element and element.Hide then
+                element:Hide()
+            end
+        end
+    end
+    content.elements = {}
+end
+
+-- Show error message in tab
+function MatchCreator:ShowTabError(tabIndex, message)
+    local content = MatchCreatorFrame.tabContents[tabIndex]
+    self:ClearTabContent(tabIndex)
+    
+    local errorText = content.child:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    errorText:SetPoint("CENTER", content.child, "CENTER")
+    errorText:SetText("|cFFFF6666" .. message .. "|r")
+    table.insert(content.elements, errorText)
+end
+
+-- Get top spec from role recommendations
+function MatchCreator:GetTopSpec(roleSpecs)
+    local topSpec = nil
+    local topRating = 0
+    
+    for spec, rating in pairs(roleSpecs) do
+        if rating > topRating then
+            topRating = rating
+            topSpec = {spec = spec, rating = rating}
+        end
+    end
+    
+    return topSpec
+end-- Match Creator Addon - Clean Working Version
 -- TOC: ## Interface: 100200
 -- TOC: ## Title: Match Creator
 -- TOC: ## Notes: Advanced dungeon group composition analyzer
