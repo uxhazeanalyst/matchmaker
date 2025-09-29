@@ -1,5 +1,542 @@
--- Initialize Class Spec Utilities Database
-function MatchCreator:InitializeClassUtilities()
+-- Initialize Smart Suggestions System
+function MatchCreator:InitializeSmartSuggestions()
+    self.smartSuggestions = {
+        currentGroup = nil,
+        criticalGaps = {},
+        warnings = {},
+        monitoring = false,
+        applicantScores = {},
+        lastUpdate = 0
+    }
+    
+    -- Hook into LFG events
+    self:HookLFGEvents()
+    
+    print("|cFF88FF88Smart Suggestions:|r Initialized!")
+end
+
+-- Hook into LFG system events
+function MatchCreator:HookLFGEvents()
+    local frame = CreateFrame("Frame", "MatchCreatorLFGFrame")
+    frame:RegisterEvent("LFG_LIST_ACTIVE_ENTRY_UPDATE")
+    frame:RegisterEvent("LFG_LIST_SEARCH_RESULTS_RECEIVED")
+    frame:RegisterEvent("LFG_LIST_APPLICANT_LIST_UPDATED")
+    frame:RegisterEvent("GROUP_ROSTER_UPDATE")
+    frame:RegisterEvent("PLAYER_ENTERING_WORLD")
+    
+    frame:SetScript("OnEvent", function(self, event, ...)
+        if event == "LFG_LIST_ACTIVE_ENTRY_UPDATE" then
+            MatchCreator:OnLFGEntryUpdate()
+        elseif event == "LFG_LIST_APPLICANT_LIST_UPDATED" then
+            MatchCreator:OnApplicantListUpdate()
+        elseif event == "GROUP_ROSTER_UPDATE" then
+            MatchCreator:OnGroupRosterUpdate()
+        elseif event == "PLAYER_ENTERING_WORLD" then
+            MatchCreator:CheckLFGState()
+        end
+    end)
+end
+
+-- Handle LFG entry update
+function MatchCreator:OnLFGEntryUpdate()
+    if C_LFGList.HasActiveEntryInfo() then
+        -- Start monitoring when group is created
+        self:StartGroupMonitoring()
+        
+        -- Auto-show UI near Group Finder
+        if MatchCreatorFrame then
+            self:PositionNearGroupFinder()
+        end
+    else
+        self:StopGroupMonitoring()
+    end
+end
+
+-- Start group monitoring
+function MatchCreator:StartGroupMonitoring()
+    if self.smartSuggestions.monitoring then return end
+    
+    self.smartSuggestions.monitoring = true
+    
+    -- Analyze current group
+    self:AnalyzeGroupComposition()
+    
+    -- Start update timer
+    if not self.monitorTimer then
+        self.monitorTimer = C_Timer.NewTicker(3, function()
+            if self.smartSuggestions.monitoring then
+                self:AnalyzeGroupComposition()
+                self:UpdateSmartSuggestionsUI()
+            end
+        end)
+    end
+    
+    print("|cFF88FF88Smart Monitor:|r Group analysis active")
+end
+
+-- Stop group monitoring
+function MatchCreator:StopGroupMonitoring()
+    self.smartSuggestions.monitoring = false
+    
+    if self.monitorTimer then
+        self.monitorTimer:Cancel()
+        self.monitorTimer = nil
+    end
+end
+
+-- Analyze current group composition
+function MatchCreator:AnalyzeGroupComposition()
+    local group = self:AnalyzeCurrentGroup()
+    if not group then
+        self.smartSuggestions.currentGroup = nil
+        return
+    end
+    
+    local currentDungeon = self:GetCurrentDungeon()
+    local dungeonData = self.dungeonData[currentDungeon]
+    
+    if not dungeonData then return end
+    
+    -- Analyze utility coverage
+    local utilities = {
+        interrupt = 0,
+        dispel = 0,
+        enrageRemoval = 0,
+        fearImmunity = 0,
+        mobility = 0
+    }
+    
+    local allMembers = {}
+    for _, tanks in pairs({group.tanks}) do
+        for _, member in ipairs(tanks) do
+            table.insert(allMembers, member)
+        end
+    end
+    for _, healers in pairs({group.healers}) do
+        for _, member in ipairs(healers) do
+            table.insert(allMembers, member)
+        end
+    end
+    for _, dps in ipairs(group.dps) do
+        table.insert(allMembers, dps)
+    end
+    
+    -- Count utilities
+    for _, member in ipairs(allMembers) do
+        local specKey = member.class .. "_" .. (member.spec or "Unknown")
+        local memberUtils = self:GetSpecUtilities(specKey)
+        
+        if memberUtils then
+            if memberUtils.interrupt then utilities.interrupt = utilities.interrupt + 1 end
+            if memberUtils.dispel then utilities.dispel = utilities.dispel + 1 end
+            if memberUtils.enrageRemoval then utilities.enrageRemoval = utilities.enrageRemoval + 1 end
+            if memberUtils.fearImmunity then utilities.fearImmunity = utilities.fearImmunity + 1 end
+            if memberUtils.mobility == "excellent" or memberUtils.mobility == "high" then
+                utilities.mobility = utilities.mobility + 1
+            end
+        end
+    end
+    
+    -- Detect critical gaps
+    local criticalGaps = {}
+    local mechanics = dungeonData.mechanics
+    
+    if mechanics.interrupt >= 80 and utilities.interrupt < 2 then
+        table.insert(criticalGaps, {
+            type = "interrupt",
+            severity = "HIGH",
+            message = "Insufficient interrupt coverage (" .. utilities.interrupt .. "/2+ needed)",
+            requirement = 2,
+            current = utilities.interrupt
+        })
+    end
+    
+    if mechanics.dispel >= 80 and utilities.dispel < 1 then
+        table.insert(criticalGaps, {
+            type = "dispel",
+            severity = "CRITICAL",
+            message = "No dispel coverage (REQUIRED for this dungeon)",
+            requirement = 1,
+            current = utilities.dispel
+        })
+    end
+    
+    if mechanics.enrageRemoval >= 80 and utilities.enrageRemoval < 1 then
+        table.insert(criticalGaps, {
+            type = "enrageRemoval",
+            severity = "CRITICAL",
+            message = "No enrage removal (REQUIRED - Soothe/Tranq needed)",
+            requirement = 1,
+            current = utilities.enrageRemoval
+        })
+    end
+    
+    -- Check for problematic combinations
+    local warnings = self:CheckGroupWarnings(group, dungeonData, utilities)
+    
+    -- Calculate overall group score
+    local groupScore = self:CalculateGroupScore(group, dungeonData, utilities)
+    
+    self.smartSuggestions.currentGroup = {
+        members = allMembers,
+        utilities = utilities,
+        criticalGaps = criticalGaps,
+        warnings = warnings,
+        groupScore = groupScore,
+        timestamp = time()
+    }
+end
+
+-- Check for group warnings
+function MatchCreator:CheckGroupWarnings(group, dungeonData, utilities)
+    local warnings = {}
+    local mechanics = dungeonData.mechanics
+    
+    -- Check mobility in high-mobility dungeons
+    if mechanics.mobility >= 85 and utilities.mobility < 2 then
+        table.insert(warnings, {
+            severity = "MEDIUM",
+            type = "MOBILITY",
+            message = "Low mobility for high-movement dungeon",
+            suggestion = "Consider recruiting mobile specs"
+        })
+    end
+    
+    -- Check affix-specific warnings
+    local affixes = self:GetCurrentAffixes()
+    for _, affix in ipairs(affixes) do
+        if affix == "Raging" and utilities.enrageRemoval == 0 then
+            table.insert(warnings, {
+                severity = "CRITICAL",
+                type = "AFFIX_CRITICAL",
+                message = "RAGING WEEK: No enrage removal!",
+                suggestion = "MUST recruit Hunter or Druid"
+            })
+        elseif affix == "Inspiring" and utilities.interrupt < 3 then
+            table.insert(warnings, {
+                severity = "HIGH",
+                type = "AFFIX_WARNING",
+                message = "Inspiring week needs extra interrupts",
+                suggestion = "Recruit interrupt-heavy specs"
+            })
+        end
+    end
+    
+    return warnings
+end
+
+-- Calculate overall group score
+function MatchCreator:CalculateGroupScore(group, dungeonData, utilities)
+    local score = 70 -- Base score
+    
+    -- Utility coverage bonuses
+    if utilities.interrupt >= 3 then score = score + 10 end
+    if utilities.dispel >= 2 then score = score + 8 end
+    if utilities.enrageRemoval >= 1 then score = score + 5 end
+    
+    -- Penalties for critical gaps
+    if dungeonData.mechanics.interrupt >= 80 and utilities.interrupt < 2 then
+        score = score - 20
+    end
+    if dungeonData.mechanics.dispel >= 80 and utilities.dispel < 1 then
+        score = score - 25
+    end
+    if dungeonData.mechanics.enrageRemoval >= 80 and utilities.enrageRemoval < 1 then
+        score = score - 30
+    end
+    
+    return math.max(0, math.min(100, score))
+end
+
+-- Handle applicant list update
+function MatchCreator:OnApplicantListUpdate()
+    -- Score all current applicants
+    local applicants = C_LFGList.GetApplicants()
+    if not applicants then return end
+    
+    for _, applicantID in ipairs(applicants) do
+        self:ScoreApplicant(applicantID)
+    end
+end
+
+-- Score individual applicant
+function MatchCreator:ScoreApplicant(applicantID)
+    local applicantInfo = C_LFGList.GetApplicantMemberInfo(applicantID, 1)
+    if not applicantInfo then return end
+    
+    local currentDungeon = self:GetCurrentDungeon()
+    local dungeonData = self.dungeonData[currentDungeon]
+    if not dungeonData then return end
+    
+    -- Get spec rating for dungeon
+    local class = applicantInfo.classDisplayName or "Unknown"
+    local spec = applicantInfo.specName or "Unknown"
+    local role = applicantInfo.assignedRole or "DAMAGER"
+    
+    local specKey = class .. "_" .. spec
+    local baseRating = 60 -- Default
+    
+    -- Get rating from dungeon data
+    local roleKey = role == "TANK" and "tank" or role == "HEALER" and "healer" or "dps"
+    if dungeonData.preferredSpecs[roleKey] and dungeonData.preferredSpecs[roleKey][specKey] then
+        baseRating = dungeonData.preferredSpecs[roleKey][specKey]
+    end
+    
+    -- Check if fills critical gaps
+    local gapBonus = 0
+    if self.smartSuggestions.currentGroup and self.smartSuggestions.currentGroup.criticalGaps then
+        local utilities = self:GetSpecUtilities(specKey)
+        
+        for _, gap in ipairs(self.smartSuggestions.currentGroup.criticalGaps) do
+            if gap.type == "interrupt" and utilities and utilities.interrupt then
+                gapBonus = gapBonus + 20
+            elseif gap.type == "dispel" and utilities and utilities.dispel then
+                gapBonus = gapBonus + 25
+            elseif gap.type == "enrageRemoval" and utilities and utilities.enrageRemoval then
+                gapBonus = gapBonus + 30
+            end
+        end
+    end
+    
+    local totalScore = math.min(100, baseRating + gapBonus)
+    
+    -- Store score
+    self.smartSuggestions.applicantScores[applicantID] = {
+        score = totalScore,
+        baseRating = baseRating,
+        gapBonus = gapBonus,
+        class = class,
+        spec = spec,
+        role = role,
+        timestamp = time()
+    }
+    
+    -- Show notification for high-priority applicants
+    if gapBonus >= 20 then
+        self:ShowApplicantAlert(applicantID, totalScore, gapBonus)
+    end
+end
+
+-- Show applicant alert
+function MatchCreator:ShowApplicantAlert(applicantID, score, gapBonus)
+    local scoreData = self.smartSuggestions.applicantScores[applicantID]
+    if not scoreData then return end
+    
+    -- Create alert frame
+    local alert = CreateFrame("Frame", nil, UIParent)
+    alert:SetSize(350, 70)
+    alert:SetPoint("TOP", UIParent, "TOP", 0, -100)
+    alert:SetFrameStrata("HIGH")
+    
+    -- Background
+    local bg = alert:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    
+    if gapBonus >= 25 then
+        bg:SetColorTexture(0.8, 0.1, 0.1, 0.95) -- Red for critical
+    else
+        bg:SetColorTexture(0.1, 0.7, 0.2, 0.95) -- Green for excellent
+    end
+    
+    -- Title
+    local title = alert:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    title:SetPoint("TOP", alert, "TOP", 0, -10)
+    
+    if gapBonus >= 25 then
+        title:SetText("|cFFFFFFFFCRITICAL UTILITY FOUND!|r")
+    else
+        title:SetText("|cFFFFFFFFExcellent Applicant!|r")
+    end
+    
+    -- Details
+    local details = alert:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    details:SetPoint("CENTER", alert, "CENTER", 0, -5)
+    details:SetText(string.format("|cFF00FF00%s %s|r - |cFFFFD700%d%% match|r", 
+        scoreData.class, scoreData.spec, score))
+    
+    -- Play sound
+    if gapBonus >= 25 then
+        PlaySound(SOUNDKIT.RAID_WARNING)
+    else
+        PlaySound(SOUNDKIT.READY_CHECK)
+    end
+    
+    -- Auto-hide
+    C_Timer.After(5, function()
+        if alert then
+            UIFrameFadeOut(alert, 0.5, alert:GetAlpha(), 0)
+            C_Timer.After(0.5, function()
+                if alert then alert:Hide() end
+            end)
+        end
+    end)
+end
+
+-- Handle group roster update
+function MatchCreator:OnGroupRosterUpdate()
+    if self.smartSuggestions.monitoring then
+        self:AnalyzeGroupComposition()
+    end
+end
+
+-- Position UI near Group Finder
+function MatchCreator:PositionNearGroupFinder()
+    if not MatchCreatorFrame then return end
+    
+    if LFGListFrame and LFGListFrame:IsShown() then
+        MatchCreatorFrame:ClearAllPoints()
+        MatchCreatorFrame:SetPoint("LEFT", LFGListFrame, "RIGHT", 10, 0)
+    end
+end
+
+-- Create Smart Suggestions UI
+function MatchCreator:ShowSmartSuggestionsUI()
+    if MatchCreatorSmartFrame then
+        MatchCreatorSmartFrame:Show()
+        self:UpdateSmartSuggestionsUI()
+        return
+    end
+    
+    -- Create smart suggestions frame
+    local frame = CreateFrame("Frame", "MatchCreatorSmartFrame", UIParent, "BasicFrameTemplateWithInset")
+    frame:SetSize(400, 350)
+    frame:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -50, -50)
+    
+    frame.title = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    frame.title:SetPoint("LEFT", frame.TitleBg, "LEFT", 5, 0)
+    frame.title:SetText("Smart Group Analysis")
+    
+    frame:SetMovable(true)
+    frame:EnableMouse(true)
+    frame:RegisterForDrag("LeftButton")
+    frame:SetScript("OnDragStart", frame.StartMoving)
+    frame:SetScript("OnDragStop", frame.StopMovingOrSizing)
+    
+    -- Content area
+    frame.content = CreateFrame("ScrollFrame", nil, frame, "UIPanelScrollFrameTemplate")
+    frame.content:SetPoint("TOPLEFT", frame.Inset, "TOPLEFT", 4, -4)
+    frame.content:SetPoint("BOTTOMRIGHT", frame.Inset, "BOTTOMRIGHT", -24, 4)
+    
+    frame.contentChild = CreateFrame("Frame", nil, frame.content)
+    frame.contentChild:SetSize(360, 310)
+    frame.content:SetScrollChild(frame.contentChild)
+    
+    frame:Show()
+    self:UpdateSmartSuggestionsUI()
+end
+
+-- Update Smart Suggestions UI
+function MatchCreator:UpdateSmartSuggestionsUI()
+    local frame = MatchCreatorSmartFrame
+    if not frame then return end
+    
+    local content = frame.contentChild
+    
+    -- Clear existing content
+    if content.elements then
+        for _, element in pairs(content.elements) do
+            if element and element.Hide then element:Hide() end
+        end
+    end
+    content.elements = {}
+    
+    local yOffset = -10
+    
+    -- Group score
+    if self.smartSuggestions.currentGroup then
+        local groupData = self.smartSuggestions.currentGroup
+        
+        local scoreText = content:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        scoreText:SetPoint("TOP", content, "TOP", 0, yOffset)
+        
+        local scoreColor = groupData.groupScore >= 80 and "|cFF00FF00" or
+                          groupData.groupScore >= 60 and "|cFFFFAA00" or "|cFFFF4444"
+        
+        scoreText:SetText("Group Score: " .. scoreColor .. groupData.groupScore .. "%|r")
+        table.insert(content.elements, scoreText)
+        yOffset = yOffset - 30
+        
+        -- Utility coverage
+        local utilTitle = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        utilTitle:SetPoint("TOPLEFT", content, "TOPLEFT", 10, yOffset)
+        utilTitle:SetText("|cFFFFAA00Utility Coverage:|r")
+        table.insert(content.elements, utilTitle)
+        yOffset = yOffset - 22
+        
+        local utils = groupData.utilities
+        local utilText = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+        utilText:SetPoint("TOPLEFT", content, "TOPLEFT", 20, yOffset)
+        utilText:SetText(string.format("Interrupts: %d | Dispels: %d | Soothe: %d",
+            utils.interrupt, utils.dispel, utils.enrageRemoval))
+        table.insert(content.elements, utilText)
+        yOffset = yOffset - 25
+        
+        -- Critical gaps
+        if #groupData.criticalGaps > 0 then
+            local gapTitle = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            gapTitle:SetPoint("TOPLEFT", content, "TOPLEFT", 10, yOffset)
+            gapTitle:SetText("|cFFFF4444Critical Gaps:|r")
+            table.insert(content.elements, gapTitle)
+            yOffset = yOffset - 20
+            
+            for _, gap in ipairs(groupData.criticalGaps) do
+                local gapText = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                gapText:SetPoint("TOPLEFT", content, "TOPLEFT", 20, yOffset)
+                gapText:SetWidth(340)
+                gapText:SetJustifyH("LEFT")
+                
+                local severityColor = gap.severity == "CRITICAL" and "|cFFFF0000" or "|cFFFF6600"
+                gapText:SetText(severityColor .. "⚠ " .. gap.message .. "|r")
+                table.insert(content.elements, gapText)
+                yOffset = yOffset - (gapText:GetStringHeight() + 5)
+            end
+            yOffset = yOffset - 10
+        end
+        
+        -- Warnings
+        if #groupData.warnings > 0 then
+            local warnTitle = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+            warnTitle:SetPoint("TOPLEFT", content, "TOPLEFT", 10, yOffset)
+            warnTitle:SetText("|cFFFFAA00Warnings:|r")
+            table.insert(content.elements, warnTitle)
+            yOffset = yOffset - 20
+            
+            for _, warning in ipairs(groupData.warnings) do
+                local warnText = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                warnText:SetPoint("TOPLEFT", content, "TOPLEFT", 20, yOffset)
+                warnText:SetWidth(340)
+                warnText:SetJustifyH("LEFT")
+                warnText:SetText("|cFFFFAA00⚠ " .. warning.message .. "|r")
+                table.insert(content.elements, warnText)
+                yOffset = yOffset - (warnText:GetStringHeight() + 3)
+                
+                if warning.suggestion then
+                    local sugText = content:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+                    sugText:SetPoint("TOPLEFT", content, "TOPLEFT", 30, yOffset)
+                    sugText:SetWidth(330)
+                    sugText:SetJustifyH("LEFT")
+                    sugText:SetText("|cFF888888→ " .. warning.suggestion .. "|r")
+                    table.insert(content.elements, sugText)
+                    yOffset = yOffset - (sugText:GetStringHeight() + 5)
+                end
+            end
+        end
+    else
+        local noGroupText = content:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        noGroupText:SetPoint("CENTER", content, "CENTER")
+        noGroupText:SetText("|cFF888888Not monitoring any group|r")
+        table.insert(content.elements, noGroupText)
+    end
+end
+
+-- Check LFG state on login
+function MatchCreator:CheckLFGState()
+    C_Timer.After(2, function()
+        if C_LFGList.HasActiveEntryInfo() then
+            self:OnLFGEntryUpdate()
+        end
+    end)
+end
     self.classUtilities = {
         ["Demon Hunter"] = {
             ["Vengeance"] = {interrupt = true, mobility = "excellent", magicDefense = "excellent"},
@@ -2363,20 +2900,81 @@ SlashCmdList["MATCHCREATOR"] = function(msg)
     end
 end
 
--- Event handler for addon loading
-local eventFrame = CreateFrame("Frame")
-eventFrame:RegisterEvent("ADDON_LOADED")
-eventFrame:RegisterEvent("PLAYER_LOGIN")
+-- Enhanced slash commands with Phase 2 features
+local phase2SlashHandler = SlashCmdList["MATCHCREATOR"]
+SlashCmdList["MATCHCREATOR"] = function(msg)
+    local args = {strsplit(" ", msg)}
+    local cmd = args[1] and string.lower(args[1]) or ""
+    
+    if cmd == "smart" then
+        MatchCreator:ShowSmartSuggestionsUI()
+        
+    elseif cmd == "monitor" then
+        if MatchCreator.smartSuggestions.monitoring then
+            MatchCreator:StopGroupMonitoring()
+            print("|cFF88FF88Smart Monitor:|r Stopped")
+        else
+            MatchCreator:StartGroupMonitoring()
+            print("|cFF88FF88Smart Monitor:|r Started")
+        end
+        
+    elseif cmd == "gaps" then
+        if MatchCreator.smartSuggestions.currentGroup then
+            local groupData = MatchCreator.smartSuggestions.currentGroup
+            print("|cFF00FF00Critical Gaps Analysis:|r")
+            
+            if #groupData.criticalGaps > 0 then
+                for _, gap in ipairs(groupData.criticalGaps) do
+                    local severityColor = gap.severity == "CRITICAL" and "|cFFFF0000" or "|cFFFF6600"
+                    print(severityColor .. gap.message .. "|r")
+                end
+            else
+                print("|cFF00FF00No critical gaps detected!|r")
+            end
+        else
+            print("|cFFFF0000Error:|r No group analysis available")
+        end
+        
+    elseif cmd == "score" then
+        if MatchCreator.smartSuggestions.currentGroup then
+            local groupData = MatchCreator.smartSuggestions.currentGroup
+            local scoreColor = groupData.groupScore >= 80 and "|cFF00FF00" or
+                              groupData.groupScore >= 60 and "|cFFFFAA00" or "|cFFFF4444"
+            
+            print("|cFF00FF00Group Score:|r " .. scoreColor .. groupData.groupScore .. "%|r")
+            print("Interrupts: " .. groupData.utilities.interrupt)
+            print("Dispels: " .. groupData.utilities.dispel)
+            print("Enrage Removal: " .. groupData.utilities.enrageRemoval)
+        else
+            print("|cFFFF0000Error:|r No group analysis available")
+        end
+        
+    else
+        -- Call previous handler
+        phase2SlashHandler(msg)
+    end
+end
 
-eventFrame:SetScript("OnEvent", function(self, event, addonName)
+-- Event handler for addon loading with Phase 2
+local phase2EventFrame = CreateFrame("Frame")
+phase2EventFrame:RegisterEvent("ADDON_LOADED")
+phase2EventFrame:RegisterEvent("PLAYER_LOGIN")
+
+phase2EventFrame:SetScript("OnEvent", function(self, event, addonName)
     if event == "ADDON_LOADED" and addonName == "MatchCreator" then
         MatchCreator:Initialize()
+        MatchCreator:InitializeSmartSuggestions()
         MatchCreator:CreateMinimapButton()
         print("|cFF00FF00Match Creator|r loaded! Type |cFFFFFF00/mc help|r for commands.")
+        print("|cFF88FF88Phase 2 Features:|r Smart suggestions and real-time analysis active!")
     elseif event == "PLAYER_LOGIN" then
-        -- Additional initialization after login if needed
         if MatchCreator.minimapButton then
             MatchCreator.minimapButton:Show()
         end
+        
+        -- Check if in LFG
+        C_Timer.After(3, function()
+            MatchCreator:CheckLFGState()
+        end)
     end
 end)
