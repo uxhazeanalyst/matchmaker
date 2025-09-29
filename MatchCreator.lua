@@ -3158,13 +3158,127 @@ SlashCmdList["MATCHCREATOR"] = function(msg)
     end
 end
 
--- Enhanced slash commands with Phase 2 features
-local phase2SlashHandler = SlashCmdList["MATCHCREATOR"]
+-- Slash command handler
+SLASH_MATCHCREATOR1 = "/matchcreator"
+SLASH_MATCHCREATOR2 = "/mc"
+
 SlashCmdList["MATCHCREATOR"] = function(msg)
     local args = {strsplit(" ", msg)}
     local cmd = args[1] and string.lower(args[1]) or ""
     
-    if cmd == "smart" then
+    if cmd == "" or cmd == "show" then
+        MatchCreator:ShowRecommendationFrame()
+        
+    elseif cmd == "hide" then
+        if MatchCreatorFrame then
+            MatchCreatorFrame:Hide()
+        end
+        
+    elseif cmd == "toggle" then
+        if MatchCreatorFrame and MatchCreatorFrame:IsShown() then
+            MatchCreatorFrame:Hide()
+        else
+            MatchCreator:ShowRecommendationFrame()
+        end
+        
+    elseif cmd == "test" then
+        local dungeon = table.concat(args, " ", 2)
+        if dungeon == "" then
+            dungeon = "Mists of Tirna Scithe"
+        end
+        
+        local recommendations = MatchCreator:GetDungeonRecommendations(dungeon)
+        
+        if recommendations then
+            print("|cFF00FF00Match Creator Test - " .. dungeon .. ":|r")
+            print("Key mechanics:")
+            for mechanic, value in pairs(recommendations.summary) do
+                local color = value >= 80 and "|cFFFF4444" or value >= 60 and "|cFFFFAA00" or "|cFFFFFFFF"
+                print(string.format("  %s%s: %d%%|r", color, MatchCreator:FormatMechanicName(mechanic), value))
+            end
+        else
+            print("|cFFFF0000Error:|r Dungeon not found: " .. dungeon)
+        end
+        
+    elseif cmd == "list" then
+        print("|cFF00FF00Available Dungeons:|r")
+        for dungeonName, _ in pairs(MatchCreator.dungeonData or {}) do
+            print("  • " .. dungeonName)
+        end
+        
+    elseif cmd == "analyze" then
+        local group = MatchCreator:AnalyzeCurrentGroup()
+        if group then
+            print("|cFF00FF00Current Group Analysis:|r")
+            print("Tanks: " .. #group.tanks)
+            print("Healers: " .. #group.healers) 
+            print("DPS: " .. #group.dps)
+        else
+            print("|cFFFF0000Error:|r Not in a group")
+        end
+        
+    elseif cmd == "minimap" then
+        if MatchCreator.minimapButton then
+            if MatchCreator.minimapButton:IsShown() then
+                MatchCreator.minimapButton:Hide()
+                print("|cFF00FF00Match Creator:|r Minimap button hidden")
+            else
+                MatchCreator.minimapButton:Show()
+                print("|cFF00FF00Match Creator:|r Minimap button shown")
+            end
+        end
+        
+    elseif cmd == "reset" then
+        if MatchCreatorFrame then
+            MatchCreatorFrame:Hide()
+            MatchCreatorFrame = nil
+        end
+        print("|cFF00FF00Match Creator:|r UI reset")
+        
+    elseif cmd == "bosses" then
+        local dungeon = table.concat(args, " ", 2)
+        if dungeon and dungeon ~= "" then
+            MatchCreator:ShowBossInfo(dungeon)
+        else
+            local current = MatchCreator:GetCurrentDungeon()
+            MatchCreator:ShowBossInfo(current)
+        end
+        
+    elseif cmd == "affixes" then
+        local affixes = MatchCreator:GetCurrentAffixes()
+        if affixes and #affixes > 0 then
+            print("|cFF00FF00Current Week Affixes:|r")
+            for _, affix in ipairs(affixes) do
+                local affixData = MatchCreator.affixData and MatchCreator.affixData[affix]
+                if affixData then
+                    print("|cFFFFD700" .. affix .. ":|r " .. affixData.description)
+                    if affixData.counterClasses then
+                        print("  Best classes: " .. table.concat(affixData.counterClasses, ", "))
+                    end
+                end
+            end
+        else
+            print("|cFFFF0000Error:|r No affix data available")
+        end
+        
+    elseif cmd == "utilities" then
+        local specKey = table.concat(args, " ", 2)
+        if specKey and specKey ~= "" then
+            local utilities = MatchCreator:GetSpecUtilities(specKey)
+            if utilities then
+                print("|cFF00FF00Utilities for " .. specKey .. ":|r")
+                for util, value in pairs(utilities) do
+                    print("  " .. util .. ": " .. tostring(value))
+                end
+            else
+                print("|cFFFF0000Error:|r Spec not found")
+            end
+        else
+            print("|cFFFF0000Usage:|r /mc utilities <Class>_<Spec>")
+            print("Example: /mc utilities Demon Hunter_Vengeance")
+        end
+        
+    elseif cmd == "smart" then
         MatchCreator:ShowSmartSuggestionsUI()
         
     elseif cmd == "monitor" then
@@ -3233,36 +3347,33 @@ SlashCmdList["MATCHCREATOR"] = function(msg)
         print("/mc reset - Reset UI")
         
     else
-        -- Call previous handler if it exists
-        if phase2SlashHandler then
-            phase2SlashHandler(msg)
-        else
-            print("|cFFFF0000Unknown command:|r " .. cmd)
-            print("Type |cFFFFFF00/mc help|r for available commands")
-        end
+        print("|cFFFF0000Unknown command:|r " .. cmd)
+        print("Type |cFFFFFF00/mc help|r for available commands")
     end
 end
 
--- Event handler for addon loading with Phase 2
-local phase2EventFrame = CreateFrame("Frame")
-phase2EventFrame:RegisterEvent("ADDON_LOADED")
-phase2EventFrame:RegisterEvent("PLAYER_LOGIN")
+-- Event handler for addon loading
+local eventFrame = CreateFrame("Frame")
+eventFrame:RegisterEvent("ADDON_LOADED")
+eventFrame:RegisterEvent("PLAYER_LOGIN")
 
-phase2EventFrame:SetScript("OnEvent", function(self, event, addonName)
+eventFrame:SetScript("OnEvent", function(self, event, addonName)
     if event == "ADDON_LOADED" and addonName == "MatchCreator" then
         MatchCreator:Initialize()
         MatchCreator:InitializeSmartSuggestions()
         MatchCreator:CreateMinimapButton()
         print("|cFF00FF00Match Creator|r loaded! Type |cFFFFFF00/mc help|r for commands.")
-        print("|cFF88FF88Phase 2 Features:|r Smart suggestions and real-time analysis active!")
+        print("|cFF88FF88Phase 1 & 2:|r Smart suggestions and comprehensive dungeon analysis active!")
     elseif event == "PLAYER_LOGIN" then
         if MatchCreator.minimapButton then
             MatchCreator.minimapButton:Show()
         end
         
-        -- Check if in LFG
+        -- Check if in LFG after a short delay
         C_Timer.After(3, function()
-            MatchCreator:CheckLFGState()
+            if MatchCreator.CheckLFGState then
+                MatchCreator:CheckLFGState()
+            end
         end)
     end
 end)
