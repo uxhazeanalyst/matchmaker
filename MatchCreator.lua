@@ -1,5 +1,9 @@
--- Initialize Smart Suggestions System
+-- Initialize Smart Suggestions System (with safety checks)
 function MatchCreator:InitializeSmartSuggestions()
+    if not self.smartSuggestions then
+        self.smartSuggestions = {}
+    end
+    
     self.smartSuggestions = {
         currentGroup = nil,
         criticalGaps = {},
@@ -13,6 +17,87 @@ function MatchCreator:InitializeSmartSuggestions()
     self:HookLFGEvents()
     
     print("|cFF88FF88Smart Suggestions:|r Initialized!")
+end
+
+-- Start group monitoring (with safety)
+function MatchCreator:StartGroupMonitoring()
+    if not self.smartSuggestions then
+        self:InitializeSmartSuggestions()
+    end
+    
+    if self.smartSuggestions.monitoring then return end
+    
+    self.smartSuggestions.monitoring = true
+    
+    -- Analyze current group
+    self:AnalyzeGroupComposition()
+    
+    -- Start update timer
+    if not self.monitorTimer then
+        self.monitorTimer = C_Timer.NewTicker(3, function()
+            if MatchCreator.smartSuggestions and MatchCreator.smartSuggestions.monitoring then
+                MatchCreator:AnalyzeGroupComposition()
+                MatchCreator:UpdateSmartSuggestionsUI()
+            end
+        end)
+    end
+    
+    print("|cFF88FF88Smart Monitor:|r Group analysis active")
+end
+
+-- Stop group monitoring (with safety)
+function MatchCreator:StopGroupMonitoring()
+    if not self.smartSuggestions then return end
+    
+    self.smartSuggestions.monitoring = false
+    
+    if self.monitorTimer then
+        self.monitorTimer:Cancel()
+        self.monitorTimer = nil
+    end
+end
+
+-- Create minimap button (with safety checks)
+function MatchCreator:CreateMinimapButton()
+    if self.minimapButton then return end
+    
+    local button = CreateFrame("Button", "MatchCreatorMinimapButton", Minimap)
+    button:SetSize(32, 32)
+    button:SetPoint("TOPLEFT", Minimap, "TOPLEFT", -15, 5)
+    
+    -- Button texture
+    local texture = button:CreateTexture(nil, "BACKGROUND")
+    texture:SetSize(20, 20)
+    texture:SetPoint("CENTER")
+    texture:SetTexture("Interface\\Icons\\Achievement_Boss_Murmur")
+    
+    -- Border
+    local border = button:CreateTexture(nil, "OVERLAY")
+    border:SetSize(52, 52)
+    border:SetPoint("CENTER")
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    
+    -- Click handler
+    button:SetScript("OnClick", function(self, btn)
+        if btn == "LeftButton" then
+            MatchCreator:ShowRecommendationFrame()
+        end
+    end)
+    
+    -- Tooltip
+    button:SetScript("OnEnter", function(self)
+        GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+        GameTooltip:SetText("Match Creator", 1, 1, 1)
+        GameTooltip:AddLine("Left-click: Show recommendations", 0.7, 0.7, 0.7)
+        GameTooltip:Show()
+    end)
+    
+    button:SetScript("OnLeave", function()
+        GameTooltip:Hide()
+    end)
+    
+    self.minimapButton = button
+    return button
 end
 
 -- Hook into LFG system events
@@ -1579,7 +1664,7 @@ function MatchCreator:GetTopSpec(roleSpecs)
     end
     
     return topSpec
-end-- Match Creator Addon - Clean Working Version
+end-- Match Creator Addon - Clean Working Version with Phases 1 & 2
 -- TOC: ## Interface: 100200
 -- TOC: ## Title: Match Creator
 -- TOC: ## Notes: Advanced dungeon group composition analyzer
@@ -1587,6 +1672,14 @@ end-- Match Creator Addon - Clean Working Version
 -- TOC: ## Version: 1.0.0
 
 MatchCreator = {}
+
+-- Ensure table exists before any operations
+MatchCreator.dungeonData = {}
+MatchCreator.classUtilities = {}
+MatchCreator.affixData = {}
+MatchCreator.smartSuggestions = {}
+
+-- Initialize core data structures
 
 -- Initialize core data structures
 function MatchCreator:Initialize()
@@ -2568,8 +2661,12 @@ function MatchCreator:GetCurrentDungeon()
     return "Mists of Tirna Scithe"
 end
 
--- Get dungeon recommendations
+-- Get dungeon recommendations (with safety checks)
 function MatchCreator:GetDungeonRecommendations(dungeonName)
+    if not self.dungeonData then
+        return nil
+    end
+    
     local data = self.dungeonData[dungeonName]
     if not data then
         return nil
@@ -2579,24 +2676,137 @@ function MatchCreator:GetDungeonRecommendations(dungeonName)
     local summary = {}
     local sortedMechanics = {}
     
-    for mechanic, value in pairs(data.mechanics) do
-        if value > 0 then
-            table.insert(sortedMechanics, {name = mechanic, value = value})
+    if data.mechanics then
+        for mechanic, value in pairs(data.mechanics) do
+            if value > 0 then
+                table.insert(sortedMechanics, {name = mechanic, value = value})
+            end
+        end
+        
+        table.sort(sortedMechanics, function(a, b) return a.value > b.value end)
+        
+        for i = 1, math.min(3, #sortedMechanics) do
+            local mech = sortedMechanics[i]
+            summary[mech.name] = mech.value
         end
     end
     
-    table.sort(sortedMechanics, function(a, b) return a.value > b.value end)
-    
-    for i = 1, math.min(3, #sortedMechanics) do
-        local mech = sortedMechanics[i]
-        summary[mech.name] = mech.value
+    return {
+        mechanics = data.mechanics or {},
+        preferredSpecs = data.preferredSpecs or {},
+        summary = summary,
+        bosses = data.bosses or {}
+    }
+end
+
+-- Get spec utilities (with enhanced safety)
+function MatchCreator:GetSpecUtilities(specKey)
+    if not specKey or not self.classUtilities then
+        return nil
     end
     
-    return {
-        mechanics = data.mechanics,
-        preferredSpecs = data.preferredSpecs,
-        summary = summary
-    }
+    local class, spec = string.match(specKey, "(.+)_(.+)")
+    if not class or not spec then
+        return nil
+    end
+    
+    -- Handle "Any" spec designation
+    if spec == "Any" then
+        local classData = self.classUtilities[class]
+        if not classData then return nil end
+        
+        local combinedUtils = {}
+        for _, specUtils in pairs(classData) do
+            for util, value in pairs(specUtils) do
+                if not combinedUtils[util] then
+                    combinedUtils[util] = value
+                end
+            end
+        end
+        return combinedUtils
+    end
+    
+    if self.classUtilities[class] and self.classUtilities[class][spec] then
+        return self.classUtilities[class][spec]
+    end
+    
+    return nil
+end
+
+-- Format utilities for display (with safety)
+function MatchCreator:FormatUtilities(utilities)
+    if not utilities then return "" end
+    
+    local utilStrings = {}
+    
+    if utilities.interrupt then
+        table.insert(utilStrings, "|cFF00FF00Interrupt|r")
+    end
+    if utilities.dispel then
+        table.insert(utilStrings, "|cFF4169E1Dispel|r")
+    end
+    if utilities.enrageRemoval then
+        table.insert(utilStrings, "|cFFFF69B4Soothe|r")
+    end
+    if utilities.spellSteal then
+        table.insert(utilStrings, "|cFF9370DBSpell Steal|r")
+    end
+    if utilities.fearImmunity then
+        table.insert(utilStrings, "|cFFFFA500Fear Immune|r")
+    end
+    if utilities.mobility == "excellent" then
+        table.insert(utilStrings, "|cFFFFD700High Mobility|r")
+    end
+    if utilities.grip then
+        table.insert(utilStrings, "|cFF00CED1Grip|r")
+    end
+    
+    return table.concat(utilStrings, " • ")
+end
+
+-- Get current affixes (with safety)
+function MatchCreator:GetCurrentAffixes()
+    if not self.currentAffixes then
+        return {}
+    end
+    return self.currentAffixes
+end
+
+-- Show boss info (with safety)
+function MatchCreator:ShowBossInfo(dungeonName)
+    if not self.dungeonData then
+        print("|cFFFF0000Error:|r Dungeon database not initialized")
+        return
+    end
+    
+    local dungeonData = self.dungeonData[dungeonName]
+    if not dungeonData or not dungeonData.bosses then
+        print("|cFFFF0000Error:|r No boss data available for " .. dungeonName)
+        return
+    end
+    
+    print("|cFF00FF00Boss Strategies for " .. dungeonName .. ":|r")
+    for bossName, bossData in pairs(dungeonData.bosses) do
+        print("|cFFFFD700" .. bossName .. "|r - " .. (bossData.difficulty or "Unknown") .. " difficulty")
+        print("  " .. (bossData.tips or "No tips available"))
+    end
+end
+
+-- Get top spec from role recommendations (with safety)
+function MatchCreator:GetTopSpec(roleSpecs)
+    if not roleSpecs then return nil end
+    
+    local topSpec = nil
+    local topRating = 0
+    
+    for spec, rating in pairs(roleSpecs) do
+        if rating and rating > topRating then
+            topRating = rating
+            topSpec = {spec = spec, rating = rating}
+        end
+    end
+    
+    return topSpec
 end
 
 -- Format mechanic names for display
